@@ -16,6 +16,9 @@ const configFileSchema = z.object({
   chains: z.object({
     mainnet: chainConfigSchema.optional(),
     base: chainConfigSchema.optional(),
+    arbitrum: chainConfigSchema.optional(),
+    optimism: chainConfigSchema.optional(),
+    polygon: chainConfigSchema.optional(),
   }),
   strategy: z.enum(["funded"]).default("funded"),
   funded: z
@@ -111,14 +114,13 @@ export function loadConfig(configPath: string): AppConfig {
     const chainConfig = CHAIN_CONFIGS[name];
     if (!chainConfig) throw new Error(`Unknown chain: ${name}`);
 
-    const rpcUrl =
-      chainFileConfig.rpcUrl ||
-      (name === "mainnet" ? secrets.mainnetRpcUrl : secrets.baseRpcUrl);
-    if (!rpcUrl) throw new Error(`No RPC URL for ${name}. Set in config.json or .env`);
+    // RPC URL from config.json is primary. Fall back to env vars for backwards compat.
+    const envRpcKey = `${name.toUpperCase()}_RPC_URL`;
+    const envPrivateRpcKey = `${name.toUpperCase()}_PRIVATE_RPC_URL`;
+    const rpcUrl = chainFileConfig.rpcUrl || process.env[envRpcKey];
+    if (!rpcUrl) throw new Error(`No RPC URL for ${name}. Set rpcUrl in config.json or ${envRpcKey} in .env`);
 
-    const privateRpcUrl =
-      chainFileConfig.privateRpcUrl ||
-      (name === "mainnet" ? secrets.mainnetPrivateRpcUrl : secrets.basePrivateRpcUrl);
+    const privateRpcUrl = chainFileConfig.privateRpcUrl || process.env[envPrivateRpcKey];
 
     chains.push({
       chainConfig,
