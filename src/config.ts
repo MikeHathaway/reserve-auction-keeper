@@ -1,13 +1,13 @@
 import { z } from "zod";
 import { readFileSync } from "node:fs";
 import { isAddress, type Address, type Hex } from "viem";
-import { CHAIN_CONFIGS, type ChainConfig } from "./chains/index.js";
+import { CHAIN_CONFIGS, buildRpcUrl, type ChainConfig, type RpcProvider } from "./chains/index.js";
 
 const addressSchema = z.string().refine(isAddress, "Invalid Ethereum address");
 
 const chainConfigSchema = z.object({
   enabled: z.boolean().default(true),
-  rpcUrl: z.string().url("RPC URL must be a valid URL"),
+  rpcUrl: z.string().url("RPC URL must be a valid URL").optional(),
   privateRpcUrl: z.string().url().optional(),
   pools: z.array(addressSchema).default([]),
 });
@@ -47,10 +47,8 @@ export type ConfigFile = z.infer<typeof configFileSchema>;
 export interface EnvSecrets {
   privateKey: Hex;
   coingeckoApiKey: string;
-  mainnetRpcUrl?: string;
-  baseRpcUrl?: string;
-  mainnetPrivateRpcUrl?: string;
-  basePrivateRpcUrl?: string;
+  rpcProvider?: RpcProvider;
+  rpcApiKey?: string;
   flashbotsAuthKey?: Hex;
 }
 
@@ -90,13 +88,16 @@ function loadEnvSecrets(): EnvSecrets {
   const coingeckoApiKey = process.env.COINGECKO_API_KEY;
   if (!coingeckoApiKey) throw new Error("COINGECKO_API_KEY is required in .env");
 
+  // RPC provider: set RPC_PROVIDER (alchemy|infura) + RPC_API_KEY
+  // and URLs are auto-constructed for all chains.
+  const rpcProvider = process.env.RPC_PROVIDER as RpcProvider | undefined;
+  const rpcApiKey = process.env.RPC_API_KEY;
+
   return {
     privateKey: privateKey as Hex,
     coingeckoApiKey,
-    mainnetRpcUrl: process.env.MAINNET_RPC_URL,
-    baseRpcUrl: process.env.BASE_RPC_URL,
-    mainnetPrivateRpcUrl: process.env.MAINNET_PRIVATE_RPC_URL,
-    basePrivateRpcUrl: process.env.BASE_PRIVATE_RPC_URL,
+    rpcProvider,
+    rpcApiKey,
     flashbotsAuthKey: process.env.FLASHBOTS_AUTH_KEY as Hex | undefined,
   };
 }
@@ -114,13 +115,18 @@ export function loadConfig(configPath: string): AppConfig {
     const chainConfig = CHAIN_CONFIGS[name];
     if (!chainConfig) throw new Error(`Unknown chain: ${name}`);
 
-    // RPC URL from config.json is primary. Fall back to env vars for backwards compat.
-    const envRpcKey = `${name.toUpperCase()}_RPC_URL`;
-    const envPrivateRpcKey = `${name.toUpperCase()}_PRIVATE_RPC_URL`;
-    const rpcUrl = chainFileConfig.rpcUrl || process.env[envRpcKey];
-    if (!rpcUrl) throw new Error(`No RPC URL for ${name}. Set rpcUrl in config.json or ${envRpcKey} in .env`);
+    // RPC URL resolution priority:
+    // 1. Explicit rpcUrl in config.json (per-chain override)
+    // 2. Auto-constructed from RPC_PROVIDER + RPC_API_KEY (one key, all chains)
+    // 3. Chain's default public RPC (free, rate-limited)
+    const rpcUrl: string =
+      chainFileConfig.rpcUrl ||
+      (secrets.rpcProvider && secrets.rpcApiKey
+        ? buildRpcUrl(chainConfig, secrets.rpcProvider, secrets.rpcApiKey)
+        : null) ||
+      chainConfig.defaultRpcUrl;
 
-    const privateRpcUrl = chainFileConfig.privateRpcUrl || process.env[envPrivateRpcKey];
+    const privateRpcUrl = chainFileConfig.privateRpcUrl;
 
     chains.push({
       chainConfig,

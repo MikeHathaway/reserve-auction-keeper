@@ -15,7 +15,6 @@ describe("config", () => {
   beforeEach(() => {
     process.env.PRIVATE_KEY = "0x" + "ab".repeat(32);
     process.env.COINGECKO_API_KEY = "test-api-key";
-    process.env.BASE_RPC_URL = "https://base-rpc.example.com";
   });
 
   afterEach(() => {
@@ -24,7 +23,8 @@ describe("config", () => {
     } catch {}
     delete process.env.PRIVATE_KEY;
     delete process.env.COINGECKO_API_KEY;
-    delete process.env.BASE_RPC_URL;
+    delete process.env.RPC_PROVIDER;
+    delete process.env.RPC_API_KEY;
   });
 
   it("loads valid config", () => {
@@ -98,19 +98,51 @@ describe("config", () => {
     expect(() => loadConfig(CONFIG_FILE)).toThrow();
   });
 
-  it("loads both chains when enabled", () => {
-    process.env.MAINNET_RPC_URL = "https://mainnet-rpc.example.com";
+  it("loads multiple chains when enabled", () => {
     writeConfig({
       chains: {
         base: { enabled: true, rpcUrl: "https://base-rpc.example.com" },
         mainnet: { enabled: true, rpcUrl: "https://mainnet-rpc.example.com" },
+        arbitrum: { enabled: true, rpcUrl: "https://arb-rpc.example.com" },
       },
       funded: { targetExitPriceUsd: 0.1 },
     });
 
     const config = loadConfig(CONFIG_FILE);
-    expect(config.chains).toHaveLength(2);
-    delete process.env.MAINNET_RPC_URL;
+    expect(config.chains).toHaveLength(3);
+  });
+
+  it("auto-constructs RPC URLs from provider API key", () => {
+    process.env.RPC_PROVIDER = "alchemy";
+    process.env.RPC_API_KEY = "test-alchemy-key";
+    writeConfig({
+      chains: {
+        base: { enabled: true },
+        arbitrum: { enabled: true },
+        optimism: { enabled: true },
+      },
+      funded: { targetExitPriceUsd: 0.1 },
+    });
+
+    const config = loadConfig(CONFIG_FILE);
+    expect(config.chains).toHaveLength(3);
+    expect(config.chains[0].rpcUrl).toContain("alchemy.com");
+    expect(config.chains[0].rpcUrl).toContain("test-alchemy-key");
+    expect(config.chains[1].rpcUrl).toContain("alchemy.com");
+    expect(config.chains[2].rpcUrl).toContain("alchemy.com");
+  });
+
+  it("falls back to default public RPC when no key or URL provided", () => {
+    writeConfig({
+      chains: {
+        base: { enabled: true },
+      },
+      funded: { targetExitPriceUsd: 0.1 },
+    });
+
+    const config = loadConfig(CONFIG_FILE);
+    expect(config.chains).toHaveLength(1);
+    expect(config.chains[0].rpcUrl).toContain("llamarpc.com");
   });
 
   it("parses pool addresses from config", () => {

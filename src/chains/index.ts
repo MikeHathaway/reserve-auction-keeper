@@ -18,6 +18,31 @@ export interface ChainConfig {
   mevMethod: "flashbots" | "private-rpc";
   /** Average gas cost in USD for profitability estimates */
   estimatedGasCostUsd: number;
+  /** Default public RPC (used if no provider key or explicit URL given) */
+  defaultRpcUrl: string;
+  /** Alchemy network slug for auto-constructing RPC URLs */
+  alchemySlug?: string;
+  /** Infura network slug for auto-constructing RPC URLs */
+  infuraSlug?: string;
+}
+
+export type RpcProvider = "alchemy" | "infura";
+
+/**
+ * Build an RPC URL from a provider API key and chain config.
+ */
+export function buildRpcUrl(
+  chainConfig: ChainConfig,
+  provider: RpcProvider,
+  apiKey: string,
+): string | null {
+  if (provider === "alchemy" && chainConfig.alchemySlug) {
+    return `https://${chainConfig.alchemySlug}.g.alchemy.com/v2/${apiKey}`;
+  }
+  if (provider === "infura" && chainConfig.infuraSlug) {
+    return `https://${chainConfig.infuraSlug}.infura.io/v3/${apiKey}`;
+  }
+  return null;
 }
 
 export const MAINNET_CONFIG: ChainConfig = {
@@ -41,6 +66,9 @@ export const MAINNET_CONFIG: ChainConfig = {
   },
   mevMethod: "flashbots",
   estimatedGasCostUsd: 5.0,
+  defaultRpcUrl: "https://eth.llamarpc.com",
+  alchemySlug: "eth-mainnet",
+  infuraSlug: "mainnet",
 };
 
 export const BASE_CONFIG: ChainConfig = {
@@ -65,6 +93,9 @@ export const BASE_CONFIG: ChainConfig = {
   },
   mevMethod: "private-rpc",
   estimatedGasCostUsd: 0.02,
+  defaultRpcUrl: "https://base.llamarpc.com",
+  alchemySlug: "base-mainnet",
+  infuraSlug: undefined,
 };
 
 export const ARBITRUM_CONFIG: ChainConfig = {
@@ -89,6 +120,9 @@ export const ARBITRUM_CONFIG: ChainConfig = {
   },
   mevMethod: "private-rpc",
   estimatedGasCostUsd: 0.02,
+  defaultRpcUrl: "https://arb1.arbitrum.io/rpc",
+  alchemySlug: "arb-mainnet",
+  infuraSlug: "arbitrum-mainnet",
 };
 
 export const OPTIMISM_CONFIG: ChainConfig = {
@@ -113,6 +147,9 @@ export const OPTIMISM_CONFIG: ChainConfig = {
   },
   mevMethod: "private-rpc",
   estimatedGasCostUsd: 0.01,
+  defaultRpcUrl: "https://mainnet.optimism.io",
+  alchemySlug: "opt-mainnet",
+  infuraSlug: "optimism-mainnet",
 };
 
 export const POLYGON_CONFIG: ChainConfig = {
@@ -137,6 +174,9 @@ export const POLYGON_CONFIG: ChainConfig = {
   },
   mevMethod: "private-rpc",
   estimatedGasCostUsd: 0.01,
+  defaultRpcUrl: "https://polygon-rpc.com",
+  alchemySlug: "polygon-mainnet",
+  infuraSlug: "polygon-mainnet",
 };
 
 export const CHAIN_CONFIGS: Record<string, ChainConfig> = {
