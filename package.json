@@ -1,0 +1,36 @@
+{
+  "name": "reserve-auction-keeper",
+  "version": "0.1.0",
+  "description": "Ajna Reserve Auction Keeper — monitors and participates in Ajna protocol reserve auctions",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "ajna",
+    "defi",
+    "keeper",
+    "reserve-auction",
+    "ethereum",
+    "base"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^17.3.1",
+    "viem": "^2.47.6",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.2",
+    "vitest": "^2.1.9"
+  }
+}

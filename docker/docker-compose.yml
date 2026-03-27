@@ -1,0 +1,14 @@
+services:
+  keeper:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    volumes:
+      - ../config.json:/app/config.json:ro
+      - ../.env:/app/.env:ro
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    environment:
+      - CONFIG_PATH=/app/config.json
+      - LOG_LEVEL=info

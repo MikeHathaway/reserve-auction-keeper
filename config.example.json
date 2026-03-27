@@ -1,0 +1,28 @@
+{
+  "chains": {
+    "base": {
+      "enabled": true,
+      "rpcUrl": "https://base-mainnet.g.alchemy.com/v2/your_key",
+      "pools": []
+    },
+    "mainnet": {
+      "enabled": false,
+      "rpcUrl": "https://eth-mainnet.g.alchemy.com/v2/your_key",
+      "pools": []
+    }
+  },
+  "strategy": "funded",
+  "funded": {
+    "targetExitPriceUsd": 0.10,
+    "autoApprove": false
+  },
+  "polling": {
+    "idleIntervalMs": 60000,
+    "activeIntervalMs": 10000,
+    "profitabilityThreshold": 0.2
+  },
+  "dryRun": true,
+  "profitMarginPercent": 5,
+  "gasPriceCeilingGwei": 100,
+  "healthCheckPort": 8080
+}

@@ -1,0 +1,34 @@
+# TODOS
+
+## v2: Flash-Arb Strategy
+
+**What:** Add flash-arb execution strategy using Uniswap V3 flash swaps for zero-capital reserve auction participation.
+
+**Why:** The funded strategy requires AJNA inventory. Flash-arb lets operators participate with zero capital by borrowing AJNA via flash swap, calling takeReserves, swapping the received quote tokens back to AJNA, and repaying the loan. Profit is kept by the operator.
+
+**Gate:** Before starting, verify AJNA/bwAJNA Uniswap V3 pool depth on both Mainnet and Base. At AJNA price ~$0.003, liquidity may be too thin for profitable flash swaps.
+
+**Context:**
+- Architecture already supports this via the `ExecutionStrategy` interface in `src/strategies/interface.ts`
+- Needs `FlashArbExecutor.sol` Solidity contract (Uniswap V3 flash swap, callback access control via CREATE2 pool address verification, multi-hop swap support for Base bwAJNA routing)
+- Pricing must use executable on-chain Uniswap quotes at trade size, not Coingecko spot prices
+- Breakeven formula must include: DEX fees (0.3% per hop), price impact, flash swap fee, gas, Ajna rounding behavior
+- One contract with constructor params (ajnaToken, uniswapFactory), deployed per chain
+- Strategic consideration: open-sourcing flash-arb compresses the arbitrage edge. May be better as a private strategy.
+
+**Depends on:** v1 shipped and running, AJNA DEX liquidity verification.
+
+---
+
+## v2: Keeper Hub Integration
+
+**What:** Integrate with Ajna Keeper Hub for secure key management and gas replenishment.
+
+**Why:** v1 uses env-var private keys and encrypted keystores. Keeper Hub (referenced in the original spec) may provide a more secure and ops-friendly key management solution.
+
+**Context:**
+- The `ExecutionStrategy` interface accepts wallet/signer abstractions that can be swapped
+- Need to clarify what Keeper Hub actually provides (may be an Ajna ecosystem tool not yet built)
+- `Signer` abstraction in the strategy layer was designed with this swap-in in mind
+
+**Depends on:** Keeper Hub API/documentation availability.
