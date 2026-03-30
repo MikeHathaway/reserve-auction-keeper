@@ -92,6 +92,9 @@ npm start
 
 # Solidity executor tests
 npm run test:contracts
+
+# Mainnet fork smoke test for canonical Uniswap V3 pool verification
+npm run test:contracts:fork:mainnet
 ```
 
 ### Docker
@@ -110,6 +113,8 @@ For AJNA holders who want to exit their position into quote tokens at a specific
 - Set `targetExitPriceUsd` to your minimum acceptable value per AJNA spent (in USD worth of quote tokens)
 - The bot will call `takeReserves()` when the auction price decays enough that each AJNA spent buys at least your target amount of quote tokens
 - Pre-approve your AJNA tokens for each pool, or set `autoApprove: true`
+- In live mode, `autoApprove` uses the same MEV/private submission path as the trade instead of a public approval transaction
+- In `dryRun`, missing allowance is surfaced as a warning/error; the bot will not mutate state to auto-approve
 
 ### Strategy: Flash-Arb
 
@@ -151,6 +156,7 @@ Flash-arb borrows AJNA or bwAJNA from a configured Uniswap V3 pool, calls `takeR
 - **Mainnet live mode uses single-tx Flashbots bundles.** The keeper prepares, signs, simulates, and submits a raw bundle, then retries across up to 3 target blocks.
 - **Base live mode uses private RPC when configured.** Without `privateRpcUrl`, the submitter degrades to public mempool mode and logs a warning.
 - **Flash-arb requires a deployed executor contract.** The keeper will refuse live flash-arb mode if the chain route or executor address is missing.
+- **Flash-arb callback verification is factory-hardened.** The executor checks the callback sender against the configured Uniswap V3 factory and pool init code hash before repaying any flash loan.
 - **Gas ceiling.** The bot skips execution during gas spikes.
 - **Health check.** HTTP endpoint at `/health` (default port 8080) for monitoring.
 

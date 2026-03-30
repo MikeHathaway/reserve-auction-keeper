@@ -4,7 +4,7 @@
 
 **What:** Close the gap between the current funded keeper scaffold and the architecture the project claims to have.
 
-**Why:** The funded keeper now has a real Mainnet bundle path and an executor-backed flash-arb path, but fork-tested end-to-end execution and a stricter flash callback verification model still are not built.
+**Why:** The funded keeper now has a real Mainnet bundle path, MEV-routed approvals, and an executor-backed flash-arb path with factory-hardened callback checks, but fork-tested end-to-end execution still is not built.
 
 **Items:**
 - [x] Refactor submission results to support tx-hash and bundle-hash style outcomes
@@ -12,8 +12,9 @@
 - [x] Implement real Flashbots bundle signing, simulation, relay submission, and inclusion tracking
 - [x] Add DEX quote + slippage + liquidity checks for flash-arb viability
 - [x] Build and test a real flash-arb executor contract path
-- [ ] Harden flash callback verification against the canonical Uniswap V3 factory / CREATE2 pool address
+- [x] Harden flash callback verification against the canonical Uniswap V3 factory / CREATE2 pool address
 - [ ] Add fork tests for Mainnet private submission and flash-arb execution
+- [ ] Add end-to-end fork tests that exercise a real reserve-auction flash-arb path, not just canonical pool verification smoke checks
 
 ## v2: Flash-Arb Strategy
 

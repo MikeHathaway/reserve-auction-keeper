@@ -166,6 +166,102 @@ describe("funded strategy", () => {
     expect(publicClient.simulateContract).not.toHaveBeenCalled();
   });
 
+  it("submits approval through the mev submitter before live execution", async () => {
+    const publicClient = {
+      chain: BASE_CONFIG.chain,
+      readContract: vi.fn()
+        .mockResolvedValueOnce(parseEther("100"))
+        .mockResolvedValueOnce(0n),
+      waitForTransactionReceipt: vi.fn().mockResolvedValue({}),
+    };
+    const walletClient = {
+      account: { address: WALLET_ADDRESS },
+    };
+    const submitter = makeSubmitter();
+    vi.mocked(submitter.submit)
+      .mockResolvedValueOnce({
+        mode: "private-rpc",
+        txHash: "0x" + "aa".repeat(32),
+        privateSubmission: true,
+      })
+      .mockResolvedValueOnce({
+        mode: "private-rpc",
+        txHash: "0x" + "bb".repeat(32),
+        privateSubmission: true,
+      });
+
+    const strategy = createFundedStrategy(
+      publicClient as never,
+      walletClient as never,
+      BASE_CONFIG.ajnaToken,
+      submitter,
+      {
+        targetExitPriceUsd: 0.1,
+        autoApprove: true,
+        profitMarginPercent: 5,
+        dryRun: false,
+      },
+    );
+
+    const result = await strategy.execute(makeContext());
+
+    expect(submitter.submit).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        to: BASE_CONFIG.ajnaToken,
+        functionName: "approve",
+        args: [POOL_ADDRESS, parseEther("100")],
+        account: WALLET_ADDRESS,
+      }),
+    );
+    expect(publicClient.waitForTransactionReceipt).toHaveBeenCalledWith({
+      hash: "0x" + "aa".repeat(32),
+    });
+    expect(submitter.submit).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        to: POOL_ADDRESS,
+        functionName: "takeReserves",
+        args: [parseEther("50")],
+        account: WALLET_ADDRESS,
+      }),
+    );
+    expect(result.txHash).toBe("0x" + "bb".repeat(32));
+  });
+
+  it("refuses to auto-approve during dry runs", async () => {
+    const publicClient = {
+      chain: BASE_CONFIG.chain,
+      readContract: vi.fn()
+        .mockResolvedValueOnce(parseEther("100"))
+        .mockResolvedValueOnce(0n),
+      simulateContract: vi.fn(),
+    };
+    const walletClient = {
+      account: { address: WALLET_ADDRESS },
+    };
+    const submitter = makeSubmitter();
+
+    const strategy = createFundedStrategy(
+      publicClient as never,
+      walletClient as never,
+      BASE_CONFIG.ajnaToken,
+      submitter,
+      {
+        targetExitPriceUsd: 0.1,
+        autoApprove: true,
+        profitMarginPercent: 5,
+        dryRun: true,
+      },
+    );
+
+    await expect(strategy.execute(makeContext())).rejects.toThrow(
+      "Dry run cannot auto-approve",
+    );
+    expect(submitter.submit).not.toHaveBeenCalled();
+    expect(publicClient.simulateContract).not.toHaveBeenCalled();
+  });
+
   it("estimateProfit uses the total quote-token value minus AJNA cost", async () => {
     const publicClient = {
       chain: BASE_CONFIG.chain,

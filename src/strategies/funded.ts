@@ -147,22 +147,45 @@ export function createFundedStrategy(
       throw new Error(`Insufficient allowance for pool ${pool}. Set autoApprove: true or approve manually.`);
     }
 
+    if (config.dryRun) {
+      logger.warn("Dry run cannot auto-approve missing allowance", {
+        pool,
+        required: formatEther(amount),
+        current: formatEther(allowance),
+      });
+      throw new Error(
+        `Insufficient allowance for pool ${pool}. Dry run cannot auto-approve; approve manually or disable dryRun.`,
+      );
+    }
+
     logger.info("Approving AJNA spend for pool", {
       pool,
       amount: formatEther(amount),
+      submitter: submitter.name,
     });
 
-    const hash = await walletClient.writeContract({
-      address: ajnaToken,
+    const submission = await submitter.submit({
+      to: ajnaToken,
       abi: ERC20_ABI,
       functionName: "approve",
       args: [pool, amount],
-      chain: publicClient.chain,
-      account: walletClient.account!,
+      account: walletAddress,
     });
 
-    await publicClient.waitForTransactionReceipt({ hash });
-    logger.info("AJNA approval confirmed", { pool, hash });
+    if (!submission.txHash) {
+      throw new Error(
+        `Approval submission via ${submitter.name} did not return a transaction hash.`,
+      );
+    }
+
+    await publicClient.waitForTransactionReceipt({ hash: submission.txHash });
+    logger.info("AJNA approval confirmed", {
+      pool,
+      txHash: submission.txHash,
+      submissionMode: submission.mode,
+      bundleHash: submission.bundleHash,
+      targetBlock: submission.targetBlock?.toString(),
+    });
   }
 
   return {

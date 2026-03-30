@@ -20,6 +20,7 @@ interface IUniswapV3FlashCallback {
 interface IUniswapV3PoolLike {
     function token0() external view returns (address);
     function token1() external view returns (address);
+    function fee() external view returns (uint24);
     function flash(address recipient, uint256 amount0, uint256 amount1, bytes calldata data) external;
 }
 
@@ -38,7 +39,9 @@ interface ISwapRouterLike {
 contract FlashArbExecutor is IUniswapV3FlashCallback {
     error Unauthorized();
     error InvalidAddress();
+    error InvalidConfig();
     error InvalidFlashPool();
+    error InvalidFactoryPool();
     error UnsupportedBorrowToken();
     error InsufficientRepayment();
 
@@ -54,6 +57,8 @@ contract FlashArbExecutor is IUniswapV3FlashCallback {
 
     address public immutable ajnaToken;
     address public immutable swapRouter;
+    address public immutable uniswapV3Factory;
+    bytes32 public immutable uniswapV3PoolInitCodeHash;
     address public immutable owner;
 
     event FlashArbExecuted(
@@ -70,13 +75,21 @@ contract FlashArbExecutor is IUniswapV3FlashCallback {
         _;
     }
 
-    constructor(address ajnaToken_, address swapRouter_) {
-        if (ajnaToken_ == address(0) || swapRouter_ == address(0)) {
+    constructor(
+        address ajnaToken_,
+        address swapRouter_,
+        address uniswapV3Factory_,
+        bytes32 uniswapV3PoolInitCodeHash_
+    ) {
+        if (ajnaToken_ == address(0) || swapRouter_ == address(0) || uniswapV3Factory_ == address(0)) {
             revert InvalidAddress();
         }
+        if (uniswapV3PoolInitCodeHash_ == bytes32(0)) revert InvalidConfig();
 
         ajnaToken = ajnaToken_;
         swapRouter = swapRouter_;
+        uniswapV3Factory = uniswapV3Factory_;
+        uniswapV3PoolInitCodeHash = uniswapV3PoolInitCodeHash_;
         owner = msg.sender;
     }
 
@@ -106,6 +119,7 @@ contract FlashArbExecutor is IUniswapV3FlashCallback {
     ) external override {
         ExecuteParams memory params = abi.decode(data, (ExecuteParams));
         if (msg.sender != params.flashPool) revert InvalidFlashPool();
+        if (!_isCanonicalFactoryPool(params.flashPool)) revert InvalidFactoryPool();
 
         uint256 repayAmount = params.borrowAmount + fee0 + fee1;
 
@@ -153,5 +167,26 @@ contract FlashArbExecutor is IUniswapV3FlashCallback {
 
     function _transferToken(address token, address to, uint256 amount) internal {
         if (!IERC20Like(token).transfer(to, amount)) revert InvalidAddress();
+    }
+
+    function isCanonicalFactoryPool(address flashPool) external view returns (bool) {
+        return _isCanonicalFactoryPool(flashPool);
+    }
+
+    function _isCanonicalFactoryPool(address flashPool) internal view returns (bool) {
+        IUniswapV3PoolLike pool = IUniswapV3PoolLike(flashPool);
+        bytes32 salt = keccak256(abi.encode(pool.token0(), pool.token1(), pool.fee()));
+        address expected = address(uint160(uint256(
+            keccak256(
+                abi.encodePacked(
+                    hex"ff",
+                    uniswapV3Factory,
+                    salt,
+                    uniswapV3PoolInitCodeHash
+                )
+            )
+        )));
+
+        return expected == flashPool;
     }
 }

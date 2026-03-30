@@ -6,15 +6,19 @@ import {TestBase} from "./TestBase.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockAjnaPool} from "./mocks/MockAjnaPool.sol";
 import {MockSwapRouter} from "./mocks/MockSwapRouter.sol";
+import {MockUniswapV3Factory} from "./mocks/MockUniswapV3Factory.sol";
 import {MockUniswapV3Pool} from "./mocks/MockUniswapV3Pool.sol";
 
 contract FlashArbExecutorTest is TestBase {
     uint256 internal constant WAD = 1e18;
+    uint24 internal constant POOL_FEE = 3000;
 
     MockERC20 internal ajna;
     MockERC20 internal quote;
     MockSwapRouter internal router;
     MockAjnaPool internal ajnaPool;
+    MockUniswapV3Factory internal factory;
+    MockUniswapV3Factory internal rogueFactory;
     MockUniswapV3Pool internal flashPool;
     FlashArbExecutor internal executor;
 
@@ -24,9 +28,18 @@ contract FlashArbExecutorTest is TestBase {
         ajna = new MockERC20("Ajna", "AJNA");
         quote = new MockERC20("Quote", "QUOTE");
         router = new MockSwapRouter(address(quote), address(ajna));
-        executor = new FlashArbExecutor(address(ajna), address(router));
+        factory = new MockUniswapV3Factory();
+        rogueFactory = new MockUniswapV3Factory();
+        executor = new FlashArbExecutor(
+            address(ajna),
+            address(router),
+            address(factory),
+            keccak256(type(MockUniswapV3Pool).creationCode)
+        );
         ajnaPool = new MockAjnaPool(address(ajna), address(quote), 2 * WAD);
-        flashPool = new MockUniswapV3Pool(address(ajna), address(quote), 1 * WAD, 0);
+        flashPool = MockUniswapV3Pool(
+            factory.createPool(address(ajna), address(quote), POOL_FEE, 1 * WAD, 0)
+        );
 
         ajna.mint(address(flashPool), 200 * WAD);
         quote.mint(address(ajnaPool), 50 * WAD);
@@ -89,7 +102,9 @@ contract FlashArbExecutorTest is TestBase {
 
     function test_executeFlashArb_revertsForUnsupportedBorrowToken() public {
         MockERC20 other = new MockERC20("Other", "OTHER");
-        MockUniswapV3Pool badPool = new MockUniswapV3Pool(address(other), address(quote), 0, 0);
+        MockUniswapV3Pool badPool = MockUniswapV3Pool(
+            rogueFactory.createPool(address(other), address(quote), POOL_FEE, 0, 0)
+        );
 
         FlashArbExecutor.ExecuteParams memory params = FlashArbExecutor.ExecuteParams({
             flashPool: address(badPool),
@@ -102,6 +117,28 @@ contract FlashArbExecutorTest is TestBase {
         });
 
         vm.expectRevert(abi.encodeWithSelector(FlashArbExecutor.UnsupportedBorrowToken.selector));
+        executor.executeFlashArb(params);
+    }
+
+    function test_executeFlashArb_revertsForNonCanonicalFactoryPool() public {
+        router.setNextAmountOut(105 * WAD);
+
+        MockUniswapV3Pool roguePool = MockUniswapV3Pool(
+            rogueFactory.createPool(address(ajna), address(quote), POOL_FEE, 1 * WAD, 0)
+        );
+        ajna.mint(address(roguePool), 200 * WAD);
+
+        FlashArbExecutor.ExecuteParams memory params = FlashArbExecutor.ExecuteParams({
+            flashPool: address(roguePool),
+            ajnaPool: address(ajnaPool),
+            borrowAmount: 100 * WAD,
+            quoteAmount: 50 * WAD,
+            swapPath: hex"010203",
+            minAjnaOut: 104 * WAD,
+            profitRecipient: profitRecipient
+        });
+
+        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutor.InvalidFactoryPool.selector));
         executor.executeFlashArb(params);
     }
 
