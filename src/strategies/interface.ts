@@ -10,7 +10,11 @@ export interface AuctionContext {
 }
 
 export interface TxResult {
-  hash: Hex;
+  submissionMode: "dry-run" | "private-rpc" | "flashbots";
+  txHash?: Hex;
+  bundleHash?: string;
+  targetBlock?: bigint;
+  privateSubmission: boolean;
   pool: Address;
   amountQuoteReceived: bigint;
   ajnaCost: bigint;

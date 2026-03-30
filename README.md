@@ -4,6 +4,8 @@ An open source bot that monitors and participates in [Ajna Protocol](https://www
 
 Reserve auctions are the mechanism by which Ajna "buys back and burns" its native token using surplus quote tokens (interest) earned by pools. This bot automates participation in these Dutch auctions, executing trades when prices become favorable.
 
+Current status: funded strategy supports live execution. Mainnet uses a single-tx Flashbots bundle path, Base uses private RPC submission, and flash-arb remains scaffolded for monitoring only.
+
 ## How It Works
 
 1. **Discovers pools** by scanning the Ajna PoolFactory for all deployed pools with whitelisted quote tokens (WETH, USDC, DAI)
@@ -57,6 +59,19 @@ BASE_RPC_URL=https://base-mainnet.g.alchemy.com/v2/your_key
     "targetExitPriceUsd": 0.10,
     "autoApprove": false
   },
+  "flashArb": {
+    "maxSlippagePercent": 1,
+    "minLiquidityUsd": 100,
+    "minProfitUsd": 0,
+    "routes": {
+      "base": {
+        "quoterAddress": "0x0000000000000000000000000000000000000000",
+        "quoteToAjnaPaths": {
+          "USDC": "0x"
+        }
+      }
+    }
+  },
   "dryRun": true
 }
 ```
@@ -88,6 +103,15 @@ For AJNA holders who want to exit their position into quote tokens at a specific
 - The bot will call `takeReserves()` when the auction price decays enough that each AJNA spent buys at least your target amount of quote tokens
 - Pre-approve your AJNA tokens for each pool, or set `autoApprove: true`
 
+### Strategy: Flash-Arb (Scaffold Only)
+
+The config surface exists so you can monitor candidate opportunities, but live flash-arb execution is not built yet.
+
+- `strategy: "flash-arb"` is currently monitor-only
+- `flashArb.maxSlippagePercent`, `flashArb.minLiquidityUsd`, and `flashArb.minProfitUsd` shape the coarse pre-trade filter
+- `flashArb.routes.<chain>.quoterAddress` and `quoteToAjnaPaths` let the bot query a Uniswap V3 quoter for executable quote-token → AJNA routes
+- A real DEX quote path, executor contract, and fork-tested atomic execution are still required before this can trade
+
 ### Key Settings
 
 | Setting | Default | Description |
@@ -95,6 +119,11 @@ For AJNA holders who want to exit their position into quote tokens at a specific
 | `dryRun` | `true` | Log opportunities without executing. **Start here.** |
 | `funded.targetExitPriceUsd` | `0.10` | Minimum USD value of quote tokens received per AJNA spent |
 | `funded.autoApprove` | `false` | Auto-approve AJNA spending for pools |
+| `flashArb.maxSlippagePercent` | `1` | Slippage haircut used by the flash-arb scaffold estimate |
+| `flashArb.minLiquidityUsd` | `100` | Minimum liquidity threshold placeholder for flash-arb monitoring |
+| `flashArb.minProfitUsd` | `0` | Minimum estimated USD spread before surfacing a flash-arb candidate |
+| `flashArb.routes.<chain>.quoterAddress` | unset | Uniswap V3 quoter used for executable route quotes in monitor mode |
+| `flashArb.routes.<chain>.quoteToAjnaPaths.<symbol>` | unset | Hex-encoded Uniswap V3 path from quote token to AJNA/bwAJNA |
 | `profitMarginPercent` | `5` | Required profit margin above gas costs |
 | `gasPriceCeilingGwei` | `100` | Skip execution if gas exceeds this |
 | `polling.idleIntervalMs` | `60000` | Poll interval when no auction is near profitability |
@@ -106,7 +135,8 @@ For AJNA holders who want to exit their position into quote tokens at a specific
 
 - **Dry run by default.** The bot will not execute any transactions until you set `dryRun: false`.
 - **Use a dedicated hot wallet.** Never use your main wallet. Fund it with only the AJNA you're willing to trade.
-- **MEV protection.** Transactions are submitted via Flashbots (Mainnet) or private RPC (Base) to avoid front-running.
+- **Mainnet live mode uses single-tx Flashbots bundles.** The keeper prepares, signs, simulates, and submits a raw bundle, then retries across up to 3 target blocks.
+- **Base live mode uses private RPC when configured.** Without `privateRpcUrl`, the submitter degrades to public mempool mode and logs a warning.
 - **Gas ceiling.** The bot skips execution during gas spikes.
 - **Health check.** HTTP endpoint at `/health` (default port 8080) for monitoring.
 
@@ -126,9 +156,10 @@ src/
   strategies/
     interface.ts        — ExecutionStrategy interface (pluggable)
     funded.ts           — Passive accumulator strategy
+    flash-arb.ts        — Monitor-only flash-arb scaffold
   execution/
-    mev-submitter.ts    — MevSubmitter interface
-    flashbots.ts        — Thin Flashbots HTTP client (no ethers.js)
+    mev-submitter.ts    — MEV/private orderflow submitter interface
+    flashbots.ts        — Single-tx Flashbots bundle submitter
     private-rpc.ts      — Private RPC submission for L2
     gas.ts              — Gas checks + profitability
   chains/

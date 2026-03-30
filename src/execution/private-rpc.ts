@@ -31,8 +31,9 @@ export function createPrivateRpcSubmitter(
 
   return {
     name: "private-rpc",
+    supportsLiveSubmission: true,
 
-    async submit(request: SubmitRequest): Promise<Hex> {
+    async submit(request: SubmitRequest) {
       // Health check before submitting
       if (effectiveUrl) {
         const healthy = await this.isHealthy();
@@ -71,7 +72,12 @@ export function createPrivateRpcSubmitter(
         privateRpc: !!effectiveUrl,
       });
 
-      return hash;
+      return {
+        mode: "private-rpc" as const,
+        txHash: hash,
+        privateSubmission: !!effectiveUrl,
+        relayUrl: effectiveUrl,
+      };
     },
 
     async isHealthy(): Promise<boolean> {

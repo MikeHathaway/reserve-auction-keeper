@@ -37,11 +37,14 @@ describe("private-rpc submitter", () => {
       walletClient as never,
     );
 
-    const hash = await submitter.submit(REQUEST);
+    const submission = await submitter.submit(REQUEST);
 
-    expect(hash).toBe(
-      "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    );
+    expect(submission).toEqual({
+      mode: "private-rpc",
+      txHash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      privateSubmission: false,
+      relayUrl: undefined,
+    });
     expect(walletClient.sendTransaction).toHaveBeenCalledTimes(2);
   });
 

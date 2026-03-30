@@ -12,7 +12,9 @@ import { discoverPools, getPoolReserveStates, canKickReserveAuction } from "./au
 import { getAuctionPrices } from "./auction/auction-price.js";
 import { createCoingeckoClient } from "./pricing/coingecko.js";
 import { createPriceOracle } from "./pricing/oracle.js";
+import { createUniswapV3DexQuoter } from "./pricing/uniswap-v3.js";
 import { createFundedStrategy } from "./strategies/funded.js";
+import { createFlashArbStrategy } from "./strategies/flash-arb.js";
 import type { ExecutionStrategy, AuctionContext } from "./strategies/interface.js";
 import { createFlashbotsSubmitter } from "./execution/flashbots.js";
 import { createPrivateRpcSubmitter } from "./execution/private-rpc.js";
@@ -39,6 +41,49 @@ interface ChainKeeper {
   strategy: ExecutionStrategy;
   submitter: MevSubmitter;
   pools: Address[];
+}
+
+function createStrategy(
+  resolved: ResolvedChainConfig,
+  config: AppConfig,
+  publicClient: PublicClient,
+  walletClient: WalletClient,
+  submitter: MevSubmitter,
+): ExecutionStrategy {
+  if (config.strategy === "flash-arb") {
+    const route = config.flashArb.routes[
+      resolved.chainConfig.name as keyof typeof config.flashArb.routes
+    ];
+
+    return createFlashArbStrategy({
+      maxSlippagePercent: config.flashArb.maxSlippagePercent,
+      minLiquidityUsd: config.flashArb.minLiquidityUsd,
+      minProfitUsd: config.flashArb.minProfitUsd,
+      executorAddress: config.flashArb.executorAddress,
+      dryRun: config.dryRun,
+      dexQuoter: route
+        ? createUniswapV3DexQuoter(publicClient, {
+            quoterAddress: route.quoterAddress,
+            quoteToAjnaPaths: route.quoteToAjnaPaths,
+            label: `${resolved.chainConfig.name}.flashArb`,
+          })
+        : undefined,
+    });
+  }
+
+  return createFundedStrategy(
+    publicClient,
+    walletClient,
+    resolved.chainConfig.ajnaToken,
+    submitter,
+    {
+      targetExitPriceUsd: config.funded.targetExitPriceUsd,
+      maxTakeAmount: config.funded.maxTakeAmount,
+      autoApprove: config.funded.autoApprove,
+      profitMarginPercent: config.profitMarginPercent,
+      dryRun: config.dryRun,
+    },
+  );
 }
 
 function createChainKeeper(
@@ -69,18 +114,24 @@ function createChainKeeper(
       ? createFlashbotsSubmitter(publicClient, walletClient, config.secrets.flashbotsAuthKey)
       : createPrivateRpcSubmitter(publicClient, walletClient, resolved.privateRpcUrl);
 
-  const strategy = createFundedStrategy(
+  if (!config.dryRun && !submitter.supportsLiveSubmission) {
+    throw new Error(
+      `Live ${submitter.name} submission is not implemented for ${resolved.chainConfig.name}. Refusing unsafe execution.`,
+    );
+  }
+
+  if (!config.dryRun && config.strategy === "flash-arb") {
+    throw new Error(
+      "Flash-arb execution is scaffolded but not implemented. Use dryRun: true for monitoring only.",
+    );
+  }
+
+  const strategy = createStrategy(
+    resolved,
+    config,
     publicClient,
     walletClient,
-    resolved.chainConfig.ajnaToken,
     submitter,
-    {
-      targetExitPriceUsd: config.funded.targetExitPriceUsd,
-      maxTakeAmount: config.funded.maxTakeAmount,
-      autoApprove: config.funded.autoApprove,
-      profitMarginPercent: config.profitMarginPercent,
-      dryRun: config.dryRun,
-    },
   );
 
   return {
@@ -214,7 +265,10 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
           logger.info("Execution successful", {
             chain: chainName,
             pool: result.pool,
-            hash: result.hash,
+            submissionMode: result.submissionMode,
+            txHash: result.txHash,
+            bundleHash: result.bundleHash,
+            targetBlock: result.targetBlock?.toString(),
             profitUsd: result.profitUsd.toFixed(4),
           });
         } catch (error) {

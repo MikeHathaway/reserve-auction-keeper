@@ -1,30 +1,63 @@
 import {
-  type PublicClient,
-  type WalletClient,
   type Hex,
   encodeFunctionData,
   keccak256,
-  toHex,
   numberToHex,
+  toHex,
+  type PublicClient,
+  type WalletClient,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import type { MevSubmitter, SubmitRequest } from "./mev-submitter.js";
+import type { MevSubmitter, SubmitRequest, SubmissionResult } from "./mev-submitter.js";
 import { logger } from "../utils/logger.js";
+import { getErrorMessage, isTransientRpcError, retryAsync } from "../utils/retry.js";
 
 const FLASHBOTS_RELAY_URL = "https://relay.flashbots.net";
 const MAX_BLOCK_RETRIES = 3;
+const DEFAULT_POLL_INTERVAL_MS = 1_000;
+
+interface FlashbotsOptions {
+  relayUrl?: string;
+  maxBlockRetries?: number;
+  pollIntervalMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+interface FlashbotsRpcSuccess<T> {
+  result?: T;
+  error?: { message?: string };
+}
+
+interface FlashbotsSimulationResult {
+  results?: Array<{ error?: string }>;
+  firstRevert?: { error?: string };
+}
+
+function defaultSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isReceiptNotFoundError(error: unknown): boolean {
+  return getErrorMessage(error).toLowerCase().includes("receipt");
+}
 
 /**
- * Thin Flashbots bundle submission client.
- * Uses raw HTTP + viem signing instead of @flashbots/ethers-provider-bundle.
- * Implements eth_sendBundle and eth_callBundle RPCs.
+ * Single-transaction Flashbots bundle submitter.
+ * This uses a local account to build and sign a raw EIP-1559 transaction,
+ * simulates it with eth_callBundle, then sends it with eth_sendBundle and
+ * waits for inclusion for up to N consecutive target blocks.
  */
 export function createFlashbotsSubmitter(
   publicClient: PublicClient,
   walletClient: WalletClient,
   authKey?: Hex,
+  options: FlashbotsOptions = {},
 ): MevSubmitter {
-  // Generate or use provided auth signing key
+  const relayUrl = options.relayUrl || FLASHBOTS_RELAY_URL;
+  const maxBlockRetries = options.maxBlockRetries || MAX_BLOCK_RETRIES;
+  const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+  const sleep = options.sleep || defaultSleep;
+
   const authAccount = authKey
     ? privateKeyToAccount(authKey)
     : privateKeyToAccount(
@@ -37,101 +70,222 @@ export function createFlashbotsSubmitter(
     return `${authAccount.address}:${signature}`;
   }
 
-  async function sendBundle(signedTx: Hex, targetBlock: bigint): Promise<string> {
+  async function relayRpc<T>(
+    method: string,
+    params: unknown[],
+  ): Promise<T> {
     const body = JSON.stringify({
       jsonrpc: "2.0",
       id: 1,
-      method: "eth_sendBundle",
-      params: [
-        {
-          txs: [signedTx],
-          blockNumber: numberToHex(targetBlock),
-        },
-      ],
+      method,
+      params,
     });
 
     const signature = await signFlashbotsPayload(body);
 
-    const response = await fetch(FLASHBOTS_RELAY_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Flashbots-Signature": signature,
+    const response = await retryAsync(
+      () =>
+        fetch(relayUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Flashbots-Signature": signature,
+          },
+          body,
+        }),
+      {
+        label: `flashbots.${method}.http`,
+        shouldRetry: isTransientRpcError,
       },
-      body,
-    });
+    );
 
     if (!response.ok) {
       const text = await response.text();
       throw new Error(`Flashbots relay error: ${response.status} ${text}`);
     }
 
-    const result = await response.json() as { result?: { bundleHash: string }; error?: { message: string } };
-    if (result.error) {
-      throw new Error(`Flashbots error: ${result.error.message}`);
+    const json = await response.json() as FlashbotsRpcSuccess<T>;
+    if (json.error?.message) {
+      throw new Error(`Flashbots RPC error: ${json.error.message}`);
     }
 
-    return result.result?.bundleHash || "unknown";
+    return json.result as T;
+  }
+
+  async function simulateBundle(
+    serializedTransaction: Hex,
+    targetBlock: bigint,
+  ): Promise<void> {
+    const result = await relayRpc<FlashbotsSimulationResult>(
+      "eth_callBundle",
+      [
+        {
+          txs: [serializedTransaction],
+          blockNumber: numberToHex(targetBlock),
+          stateBlockNumber: "latest",
+        },
+      ],
+    );
+
+    const nestedError =
+      result.firstRevert?.error ||
+      result.results?.find((entry) => entry.error)?.error;
+
+    if (nestedError) {
+      throw new Error(`Flashbots simulation failed: ${nestedError}`);
+    }
+  }
+
+  async function sendBundle(
+    serializedTransaction: Hex,
+    targetBlock: bigint,
+  ): Promise<string> {
+    const result = await relayRpc<{ bundleHash?: string }>(
+      "eth_sendBundle",
+      [
+        {
+          txs: [serializedTransaction],
+          blockNumber: numberToHex(targetBlock),
+        },
+      ],
+    );
+
+    if (!result.bundleHash) {
+      throw new Error("Flashbots relay returned no bundleHash");
+    }
+
+    return result.bundleHash;
+  }
+
+  async function waitForTargetBlock(targetBlock: bigint): Promise<void> {
+    while (true) {
+      const currentBlock = await publicClient.getBlockNumber();
+      if (currentBlock >= targetBlock) return;
+      await sleep(pollIntervalMs);
+    }
+  }
+
+  async function waitForBundleInclusion(
+    txHash: Hex,
+    targetBlock: bigint,
+  ): Promise<boolean> {
+    await waitForTargetBlock(targetBlock);
+
+    try {
+      const receipt = await publicClient.getTransactionReceipt({ hash: txHash });
+      return receipt.blockNumber === targetBlock;
+    } catch (error) {
+      if (isReceiptNotFoundError(error)) return false;
+      throw error;
+    }
+  }
+
+  async function buildSignedTransaction(request: SubmitRequest): Promise<{
+    serializedTransaction: Hex;
+    txHash: Hex;
+  }> {
+    const account = walletClient.account;
+    if (!account?.signTransaction) {
+      throw new Error(
+        "Flashbots submission requires a local account that can sign raw transactions.",
+      );
+    }
+
+    const calldata = encodeFunctionData({
+      abi: request.abi,
+      functionName: request.functionName,
+      args: request.args,
+    });
+
+    const prepared = await walletClient.prepareTransactionRequest({
+      account,
+      chain: publicClient.chain,
+      to: request.to,
+      data: calldata,
+      type: "eip1559",
+    });
+
+    const serializedTransaction = await account.signTransaction(prepared, {
+      serializer: publicClient.chain?.serializers?.transaction,
+    });
+    return {
+      serializedTransaction,
+      txHash: keccak256(serializedTransaction),
+    };
   }
 
   return {
     name: "flashbots",
+    supportsLiveSubmission: true,
 
-    async submit(request: SubmitRequest): Promise<Hex> {
-      const calldata = encodeFunctionData({
-        abi: request.abi,
-        functionName: request.functionName,
-        args: request.args,
-      });
+    async submit(request: SubmitRequest): Promise<SubmissionResult> {
+      const { serializedTransaction, txHash } =
+        await buildSignedTransaction(request);
 
-      const currentBlock = await publicClient.getBlockNumber();
+      let lastError: unknown;
 
-      for (let attempt = 0; attempt < MAX_BLOCK_RETRIES; attempt++) {
-        const targetBlock = currentBlock + BigInt(attempt + 1);
+      for (let attempt = 1; attempt <= maxBlockRetries; attempt++) {
+        const latestBlock = await publicClient.getBlockNumber();
+        const targetBlock = latestBlock + 1n;
 
         try {
-          // Sign the transaction
-          const hash = await walletClient.sendTransaction({
-            to: request.to,
-            data: calldata,
-            chain: publicClient.chain,
-            account: walletClient.account!,
-          });
+          await simulateBundle(serializedTransaction, targetBlock);
+          const bundleHash = await sendBundle(serializedTransaction, targetBlock);
 
-          // For the thin client, we send via the wallet directly.
-          // In a full implementation, we'd serialize the raw tx and use sendBundle.
-          // For now, send via the wallet's transport (which should be configured
-          // to use the Flashbots RPC endpoint).
           logger.info("Flashbots bundle submitted", {
+            functionName: request.functionName,
+            txHash,
+            bundleHash,
             targetBlock: targetBlock.toString(),
-            attempt: attempt + 1,
+            attempt,
           });
 
-          return hash;
+          const included = await waitForBundleInclusion(txHash, targetBlock);
+          if (!included) {
+            logger.warn("Flashbots bundle not included in target block", {
+              txHash,
+              bundleHash,
+              targetBlock: targetBlock.toString(),
+              attempt,
+            });
+            continue;
+          }
+
+          return {
+            mode: "flashbots",
+            txHash,
+            bundleHash,
+            targetBlock,
+            privateSubmission: true,
+            relayUrl,
+          };
         } catch (error) {
+          lastError = error;
           logger.warn("Flashbots bundle attempt failed", {
+            functionName: request.functionName,
+            txHash,
             targetBlock: targetBlock.toString(),
-            attempt: attempt + 1,
-            error: error instanceof Error ? error.message : String(error),
+            attempt,
+            error: getErrorMessage(error),
           });
-
-          if (attempt === MAX_BLOCK_RETRIES - 1) throw error;
         }
       }
 
-      throw new Error("Flashbots: all bundle attempts failed");
+      throw new Error(
+        `Flashbots bundle was not included after ${maxBlockRetries} attempts: ${getErrorMessage(lastError)}`,
+      );
     },
 
     async isHealthy(): Promise<boolean> {
       try {
-        const response = await fetch(FLASHBOTS_RELAY_URL, {
+        const response = await fetch(relayUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             jsonrpc: "2.0",
             id: 1,
-            method: "flashbots_getUserStats",
-            params: [{}],
+            method: "eth_chainId",
+            params: [],
           }),
         });
         return response.ok;

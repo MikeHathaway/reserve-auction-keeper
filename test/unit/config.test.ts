@@ -160,4 +160,43 @@ describe("config", () => {
     const config = loadConfig(CONFIG_FILE);
     expect(config.chains[0].pools).toHaveLength(1);
   });
+
+  it("loads flash-arb strategy configuration", () => {
+    writeConfig({
+      chains: {
+        mainnet: { enabled: true, rpcUrl: "https://mainnet-rpc.example.com" },
+      },
+      strategy: "flash-arb",
+      flashArb: {
+        maxSlippagePercent: 0.5,
+        minLiquidityUsd: 250,
+        minProfitUsd: 5,
+        executorAddress: "0x1234567890123456789012345678901234567890",
+        routes: {
+          base: {
+            quoterAddress: "0x1111111111111111111111111111111111111111",
+            quoteToAjnaPaths: {
+              USDC: "0x01020304",
+            },
+          },
+        },
+      },
+      dryRun: true,
+    });
+
+    const config = loadConfig(CONFIG_FILE);
+    expect(config.strategy).toBe("flash-arb");
+    expect(config.flashArb).toMatchObject({
+      maxSlippagePercent: 0.5,
+      minLiquidityUsd: 250,
+      minProfitUsd: 5,
+      executorAddress: "0x1234567890123456789012345678901234567890",
+    });
+    expect(config.flashArb.routes.base).toEqual({
+      quoterAddress: "0x1111111111111111111111111111111111111111",
+      quoteToAjnaPaths: {
+        USDC: "0x01020304",
+      },
+    });
+  });
 });

@@ -16,6 +16,19 @@
     "targetExitPriceUsd": 0.10,
     "autoApprove": false
   },
+  "flashArb": {
+    "maxSlippagePercent": 1,
+    "minLiquidityUsd": 100,
+    "minProfitUsd": 0,
+    "routes": {
+      "base": {
+        "quoterAddress": "0x0000000000000000000000000000000000000000",
+        "quoteToAjnaPaths": {
+          "USDC": "0x"
+        }
+      }
+    }
+  },
   "polling": {
     "idleIntervalMs": 60000,
     "activeIntervalMs": 10000,

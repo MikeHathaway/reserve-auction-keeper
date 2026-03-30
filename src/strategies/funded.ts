@@ -187,7 +187,8 @@ export function createFundedStrategy(
         });
 
         return {
-          hash: "0x0000000000000000000000000000000000000000000000000000000000000000",
+          submissionMode: "dry-run",
+          privateSubmission: false,
           pool: poolState.pool,
           amountQuoteReceived: amount,
           ajnaCost,
@@ -197,7 +198,7 @@ export function createFundedStrategy(
       }
 
       // Real execution via MEV-protected submission
-      const hash = await submitter.submit({
+      const submission = await submitter.submit({
         to: poolState.pool,
         abi: POOL_ABI,
         functionName: "takeReserves",
@@ -208,13 +209,20 @@ export function createFundedStrategy(
       logger.info("takeReserves submitted", {
         pool: poolState.pool,
         chain: ctx.chainName,
-        hash,
+        submissionMode: submission.mode,
+        txHash: submission.txHash,
+        bundleHash: submission.bundleHash,
+        targetBlock: submission.targetBlock?.toString(),
         quoteAmount: formatEther(amount),
         ajnaCost: formatEther(ajnaCost),
       });
 
       return {
-        hash,
+        submissionMode: submission.mode,
+        txHash: submission.txHash,
+        bundleHash: submission.bundleHash,
+        targetBlock: submission.targetBlock,
+        privateSubmission: submission.privateSubmission,
         pool: poolState.pool,
         amountQuoteReceived: amount,
         ajnaCost,

@@ -4,6 +4,7 @@ import { isAddress, type Address, type Hex } from "viem";
 import { CHAIN_CONFIGS, buildRpcUrl, type ChainConfig, type RpcProvider } from "./chains/index.js";
 
 const addressSchema = z.string().refine(isAddress, "Invalid Ethereum address");
+const hexSchema = z.string().regex(/^0x[0-9a-fA-F]*$/, "Invalid hex string");
 
 const chainConfigSchema = z.object({
   enabled: z.boolean().default(true),
@@ -20,12 +21,44 @@ const configFileSchema = z.object({
     optimism: chainConfigSchema.optional(),
     polygon: chainConfigSchema.optional(),
   }),
-  strategy: z.enum(["funded"]).default("funded"),
+  strategy: z.enum(["funded", "flash-arb"]).default("funded"),
   funded: z
     .object({
       targetExitPriceUsd: z.number().positive("Target exit price must be positive"),
       maxTakeAmount: z.string().optional(),
       autoApprove: z.boolean().default(false),
+    })
+    .optional(),
+  flashArb: z
+    .object({
+      maxSlippagePercent: z.number().min(0).max(100).default(1),
+      minLiquidityUsd: z.number().min(0).default(100),
+      minProfitUsd: z.number().min(0).default(0),
+      executorAddress: addressSchema.optional(),
+      routes: z
+        .object({
+          mainnet: z.object({
+            quoterAddress: addressSchema,
+            quoteToAjnaPaths: z.record(z.string(), hexSchema),
+          }).optional(),
+          base: z.object({
+            quoterAddress: addressSchema,
+            quoteToAjnaPaths: z.record(z.string(), hexSchema),
+          }).optional(),
+          arbitrum: z.object({
+            quoterAddress: addressSchema,
+            quoteToAjnaPaths: z.record(z.string(), hexSchema),
+          }).optional(),
+          optimism: z.object({
+            quoterAddress: addressSchema,
+            quoteToAjnaPaths: z.record(z.string(), hexSchema),
+          }).optional(),
+          polygon: z.object({
+            quoterAddress: addressSchema,
+            quoteToAjnaPaths: z.record(z.string(), hexSchema),
+          }).optional(),
+        })
+        .optional(),
     })
     .optional(),
   polling: z
@@ -61,11 +94,24 @@ export interface ResolvedChainConfig {
 
 export interface AppConfig {
   chains: ResolvedChainConfig[];
-  strategy: "funded";
+  strategy: "funded" | "flash-arb";
   funded: {
     targetExitPriceUsd: number;
     maxTakeAmount?: bigint;
     autoApprove: boolean;
+  };
+  flashArb: {
+    maxSlippagePercent: number;
+    minLiquidityUsd: number;
+    minProfitUsd: number;
+    executorAddress?: Address;
+    routes: Partial<Record<
+      "mainnet" | "base" | "arbitrum" | "optimism" | "polygon",
+      {
+        quoterAddress: Address;
+        quoteToAjnaPaths: Record<string, Hex>;
+      }
+    >>;
   };
   polling: {
     idleIntervalMs: number;
@@ -141,6 +187,12 @@ export function loadConfig(configPath: string): AppConfig {
   }
 
   const funded = parsed.funded || { targetExitPriceUsd: 0.1, autoApprove: false };
+  const flashArb = parsed.flashArb || {
+    maxSlippagePercent: 1,
+    minLiquidityUsd: 100,
+    minProfitUsd: 0,
+    routes: {},
+  };
   const polling = parsed.polling || {
     idleIntervalMs: 60_000,
     activeIntervalMs: 10_000,
@@ -154,6 +206,44 @@ export function loadConfig(configPath: string): AppConfig {
       targetExitPriceUsd: funded.targetExitPriceUsd,
       maxTakeAmount: funded.maxTakeAmount ? BigInt(funded.maxTakeAmount) : undefined,
       autoApprove: funded.autoApprove,
+    },
+    flashArb: {
+      maxSlippagePercent: flashArb.maxSlippagePercent,
+      minLiquidityUsd: flashArb.minLiquidityUsd,
+      minProfitUsd: flashArb.minProfitUsd,
+      executorAddress: flashArb.executorAddress as Address | undefined,
+      routes: {
+        mainnet: flashArb.routes?.mainnet
+          ? {
+              quoterAddress: flashArb.routes.mainnet.quoterAddress as Address,
+              quoteToAjnaPaths: flashArb.routes.mainnet.quoteToAjnaPaths as Record<string, Hex>,
+            }
+          : undefined,
+        base: flashArb.routes?.base
+          ? {
+              quoterAddress: flashArb.routes.base.quoterAddress as Address,
+              quoteToAjnaPaths: flashArb.routes.base.quoteToAjnaPaths as Record<string, Hex>,
+            }
+          : undefined,
+        arbitrum: flashArb.routes?.arbitrum
+          ? {
+              quoterAddress: flashArb.routes.arbitrum.quoterAddress as Address,
+              quoteToAjnaPaths: flashArb.routes.arbitrum.quoteToAjnaPaths as Record<string, Hex>,
+            }
+          : undefined,
+        optimism: flashArb.routes?.optimism
+          ? {
+              quoterAddress: flashArb.routes.optimism.quoterAddress as Address,
+              quoteToAjnaPaths: flashArb.routes.optimism.quoteToAjnaPaths as Record<string, Hex>,
+            }
+          : undefined,
+        polygon: flashArb.routes?.polygon
+          ? {
+              quoterAddress: flashArb.routes.polygon.quoterAddress as Address,
+              quoteToAjnaPaths: flashArb.routes.polygon.quoteToAjnaPaths as Record<string, Hex>,
+            }
+          : undefined,
+      },
     },
     polling,
     dryRun: parsed.dryRun,
