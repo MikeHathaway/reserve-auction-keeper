@@ -4,7 +4,7 @@ An open source bot that monitors and participates in [Ajna Protocol](https://www
 
 Reserve auctions are the mechanism by which Ajna "buys back and burns" its native token using surplus quote tokens (interest) earned by pools. This bot automates participation in these Dutch auctions, executing trades when prices become favorable.
 
-Current status: funded strategy supports live execution. Mainnet uses a single-tx Flashbots bundle path, Base uses private RPC submission, and flash-arb remains scaffolded for monitoring only.
+Current status: funded strategy supports live execution. Mainnet uses a single-tx Flashbots bundle path, Base uses private RPC submission, and flash-arb now has an executor-backed dry-run/live path when a deployed executor and per-chain routes are configured. Fork-tested end-to-end execution is still outstanding.
 
 ## How It Works
 
@@ -19,6 +19,7 @@ Current status: funded strategy supports live execution. Mainnet uses a single-t
 ### Prerequisites
 
 - Node.js 20+
+- Foundry + `svm install 0.8.27` if you want to run the Solidity executor tests
 - An Ethereum wallet with AJNA (Mainnet) or bwAJNA (Base) tokens
 - RPC endpoints for Mainnet and/or Base
 - A [Coingecko Pro API](https://www.coingecko.com/en/api/pricing) key
@@ -66,6 +67,10 @@ BASE_RPC_URL=https://base-mainnet.g.alchemy.com/v2/your_key
     "routes": {
       "base": {
         "quoterAddress": "0x0000000000000000000000000000000000000000",
+        "executorAddress": "0x0000000000000000000000000000000000000000",
+        "flashLoanPools": {
+          "USDC": "0x0000000000000000000000000000000000000000"
+        },
         "quoteToAjnaPaths": {
           "USDC": "0x"
         }
@@ -84,6 +89,9 @@ npm run dev
 
 # Production
 npm start
+
+# Solidity executor tests
+npm run test:contracts
 ```
 
 ### Docker
@@ -103,14 +111,16 @@ For AJNA holders who want to exit their position into quote tokens at a specific
 - The bot will call `takeReserves()` when the auction price decays enough that each AJNA spent buys at least your target amount of quote tokens
 - Pre-approve your AJNA tokens for each pool, or set `autoApprove: true`
 
-### Strategy: Flash-Arb (Scaffold Only)
+### Strategy: Flash-Arb
 
-The config surface exists so you can monitor candidate opportunities, but live flash-arb execution is not built yet.
+Flash-arb borrows AJNA or bwAJNA from a configured Uniswap V3 pool, calls `takeReserves()`, swaps the received quote token back to AJNA, repays the flash loan, and keeps the spread.
 
-- `strategy: "flash-arb"` is currently monitor-only
-- `flashArb.maxSlippagePercent`, `flashArb.minLiquidityUsd`, and `flashArb.minProfitUsd` shape the coarse pre-trade filter
-- `flashArb.routes.<chain>.quoterAddress` and `quoteToAjnaPaths` let the bot query a Uniswap V3 quoter for executable quote-token → AJNA routes
-- A real DEX quote path, executor contract, and fork-tested atomic execution are still required before this can trade
+- `strategy: "flash-arb"` now uses the on-chain `FlashArbExecutor` contract path
+- `flashArb.maxSlippagePercent`, `flashArb.minLiquidityUsd`, and `flashArb.minProfitUsd` gate candidate selection before execution
+- `flashArb.routes.<chain>.quoterAddress` and `quoteToAjnaPaths` provide executable Uniswap V3 quote-token → AJNA routes
+- `flashArb.routes.<chain>.flashLoanPools.<symbol>` selects the Uniswap V3 pool used for the AJNA flash borrow
+- `flashArb.routes.<chain>.executorAddress` or top-level `flashArb.executorAddress` must point at a deployed `FlashArbExecutor`
+- The runtime path is live, but you should still treat it as advanced/operator-only until fork tests exist for your target chains
 
 ### Key Settings
 
@@ -119,10 +129,13 @@ The config surface exists so you can monitor candidate opportunities, but live f
 | `dryRun` | `true` | Log opportunities without executing. **Start here.** |
 | `funded.targetExitPriceUsd` | `0.10` | Minimum USD value of quote tokens received per AJNA spent |
 | `funded.autoApprove` | `false` | Auto-approve AJNA spending for pools |
-| `flashArb.maxSlippagePercent` | `1` | Slippage haircut used by the flash-arb scaffold estimate |
-| `flashArb.minLiquidityUsd` | `100` | Minimum liquidity threshold placeholder for flash-arb monitoring |
-| `flashArb.minProfitUsd` | `0` | Minimum estimated USD spread before surfacing a flash-arb candidate |
-| `flashArb.routes.<chain>.quoterAddress` | unset | Uniswap V3 quoter used for executable route quotes in monitor mode |
+| `flashArb.maxSlippagePercent` | `1` | Slippage tolerance applied to quoted AJNA output before execution |
+| `flashArb.minLiquidityUsd` | `100` | Minimum quote-token liquidity required before evaluating a flash-arb |
+| `flashArb.minProfitUsd` | `0` | Minimum conservative USD profit after flash fee + slippage floor |
+| `flashArb.executorAddress` | unset | Optional default executor address used when a chain route does not override it |
+| `flashArb.routes.<chain>.quoterAddress` | unset | Uniswap V3 quoter used for executable route quotes |
+| `flashArb.routes.<chain>.executorAddress` | unset | Chain-specific deployed `FlashArbExecutor` |
+| `flashArb.routes.<chain>.flashLoanPools.<symbol>` | unset | Uniswap V3 pool used to flash-borrow AJNA for that quote token |
 | `flashArb.routes.<chain>.quoteToAjnaPaths.<symbol>` | unset | Hex-encoded Uniswap V3 path from quote token to AJNA/bwAJNA |
 | `profitMarginPercent` | `5` | Required profit margin above gas costs |
 | `gasPriceCeilingGwei` | `100` | Skip execution if gas exceeds this |
@@ -137,6 +150,7 @@ The config surface exists so you can monitor candidate opportunities, but live f
 - **Use a dedicated hot wallet.** Never use your main wallet. Fund it with only the AJNA you're willing to trade.
 - **Mainnet live mode uses single-tx Flashbots bundles.** The keeper prepares, signs, simulates, and submits a raw bundle, then retries across up to 3 target blocks.
 - **Base live mode uses private RPC when configured.** Without `privateRpcUrl`, the submitter degrades to public mempool mode and logs a warning.
+- **Flash-arb requires a deployed executor contract.** The keeper will refuse live flash-arb mode if the chain route or executor address is missing.
 - **Gas ceiling.** The bot skips execution during gas spikes.
 - **Health check.** HTTP endpoint at `/health` (default port 8080) for monitoring.
 
@@ -156,12 +170,14 @@ src/
   strategies/
     interface.ts        — ExecutionStrategy interface (pluggable)
     funded.ts           — Passive accumulator strategy
-    flash-arb.ts        — Monitor-only flash-arb scaffold
+    flash-arb.ts        — Executor-backed flash-arb strategy
   execution/
     mev-submitter.ts    — MEV/private orderflow submitter interface
     flashbots.ts        — Single-tx Flashbots bundle submitter
     private-rpc.ts      — Private RPC submission for L2
     gas.ts              — Gas checks + profitability
+  contracts/
+    FlashArbExecutor.sol — Uniswap V3 flash-loan executor
   chains/
     index.ts            — Chain configs (Mainnet + Base)
   contracts/abis/       — Ajna contract ABIs

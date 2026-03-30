@@ -175,6 +175,9 @@ describe("config", () => {
         routes: {
           base: {
             quoterAddress: "0x1111111111111111111111111111111111111111",
+            flashLoanPools: {
+              USDC: "0x2222222222222222222222222222222222222222",
+            },
             quoteToAjnaPaths: {
               USDC: "0x01020304",
             },
@@ -194,6 +197,9 @@ describe("config", () => {
     });
     expect(config.flashArb.routes.base).toEqual({
       quoterAddress: "0x1111111111111111111111111111111111111111",
+      flashLoanPools: {
+        USDC: "0x2222222222222222222222222222222222222222",
+      },
       quoteToAjnaPaths: {
         USDC: "0x01020304",
       },

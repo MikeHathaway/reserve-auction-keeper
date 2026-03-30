@@ -23,6 +23,10 @@
     "routes": {
       "base": {
         "quoterAddress": "0x0000000000000000000000000000000000000000",
+        "executorAddress": "0x0000000000000000000000000000000000000000",
+        "flashLoanPools": {
+          "USDC": "0x0000000000000000000000000000000000000000"
+        },
         "quoteToAjnaPaths": {
           "USDC": "0x"
         }

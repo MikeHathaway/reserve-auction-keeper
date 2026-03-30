@@ -5,6 +5,12 @@ import { CHAIN_CONFIGS, buildRpcUrl, type ChainConfig, type RpcProvider } from "
 
 const addressSchema = z.string().refine(isAddress, "Invalid Ethereum address");
 const hexSchema = z.string().regex(/^0x[0-9a-fA-F]*$/, "Invalid hex string");
+const flashArbRouteSchema = z.object({
+  quoterAddress: addressSchema,
+  executorAddress: addressSchema.optional(),
+  flashLoanPools: z.record(z.string(), addressSchema),
+  quoteToAjnaPaths: z.record(z.string(), hexSchema),
+});
 
 const chainConfigSchema = z.object({
   enabled: z.boolean().default(true),
@@ -37,26 +43,11 @@ const configFileSchema = z.object({
       executorAddress: addressSchema.optional(),
       routes: z
         .object({
-          mainnet: z.object({
-            quoterAddress: addressSchema,
-            quoteToAjnaPaths: z.record(z.string(), hexSchema),
-          }).optional(),
-          base: z.object({
-            quoterAddress: addressSchema,
-            quoteToAjnaPaths: z.record(z.string(), hexSchema),
-          }).optional(),
-          arbitrum: z.object({
-            quoterAddress: addressSchema,
-            quoteToAjnaPaths: z.record(z.string(), hexSchema),
-          }).optional(),
-          optimism: z.object({
-            quoterAddress: addressSchema,
-            quoteToAjnaPaths: z.record(z.string(), hexSchema),
-          }).optional(),
-          polygon: z.object({
-            quoterAddress: addressSchema,
-            quoteToAjnaPaths: z.record(z.string(), hexSchema),
-          }).optional(),
+          mainnet: flashArbRouteSchema.optional(),
+          base: flashArbRouteSchema.optional(),
+          arbitrum: flashArbRouteSchema.optional(),
+          optimism: flashArbRouteSchema.optional(),
+          polygon: flashArbRouteSchema.optional(),
         })
         .optional(),
     })
@@ -109,6 +100,8 @@ export interface AppConfig {
       "mainnet" | "base" | "arbitrum" | "optimism" | "polygon",
       {
         quoterAddress: Address;
+        executorAddress?: Address;
+        flashLoanPools: Record<string, Address>;
         quoteToAjnaPaths: Record<string, Hex>;
       }
     >>;
@@ -216,30 +209,40 @@ export function loadConfig(configPath: string): AppConfig {
         mainnet: flashArb.routes?.mainnet
           ? {
               quoterAddress: flashArb.routes.mainnet.quoterAddress as Address,
+              executorAddress: flashArb.routes.mainnet.executorAddress as Address | undefined,
+              flashLoanPools: flashArb.routes.mainnet.flashLoanPools as Record<string, Address>,
               quoteToAjnaPaths: flashArb.routes.mainnet.quoteToAjnaPaths as Record<string, Hex>,
             }
           : undefined,
         base: flashArb.routes?.base
           ? {
               quoterAddress: flashArb.routes.base.quoterAddress as Address,
+              executorAddress: flashArb.routes.base.executorAddress as Address | undefined,
+              flashLoanPools: flashArb.routes.base.flashLoanPools as Record<string, Address>,
               quoteToAjnaPaths: flashArb.routes.base.quoteToAjnaPaths as Record<string, Hex>,
             }
           : undefined,
         arbitrum: flashArb.routes?.arbitrum
           ? {
               quoterAddress: flashArb.routes.arbitrum.quoterAddress as Address,
+              executorAddress: flashArb.routes.arbitrum.executorAddress as Address | undefined,
+              flashLoanPools: flashArb.routes.arbitrum.flashLoanPools as Record<string, Address>,
               quoteToAjnaPaths: flashArb.routes.arbitrum.quoteToAjnaPaths as Record<string, Hex>,
             }
           : undefined,
         optimism: flashArb.routes?.optimism
           ? {
               quoterAddress: flashArb.routes.optimism.quoterAddress as Address,
+              executorAddress: flashArb.routes.optimism.executorAddress as Address | undefined,
+              flashLoanPools: flashArb.routes.optimism.flashLoanPools as Record<string, Address>,
               quoteToAjnaPaths: flashArb.routes.optimism.quoteToAjnaPaths as Record<string, Hex>,
             }
           : undefined,
         polygon: flashArb.routes?.polygon
           ? {
               quoterAddress: flashArb.routes.polygon.quoterAddress as Address,
+              executorAddress: flashArb.routes.polygon.executorAddress as Address | undefined,
+              flashLoanPools: flashArb.routes.polygon.flashLoanPools as Record<string, Address>,
               quoteToAjnaPaths: flashArb.routes.polygon.quoteToAjnaPaths as Record<string, Hex>,
             }
           : undefined,

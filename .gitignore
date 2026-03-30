@@ -3,3 +3,6 @@ dist/
 .env
 config.json
 *.log
+cache/
+forge-out/
+broadcast/

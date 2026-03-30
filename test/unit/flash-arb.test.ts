@@ -1,6 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { parseEther } from "viem";
 import { createFlashArbStrategy } from "../../src/strategies/flash-arb.js";
+import type { MevSubmitter } from "../../src/execution/mev-submitter.js";
+import { BASE_CONFIG } from "../../src/chains/index.js";
+
+const WALLET_ADDRESS = "0x3333333333333333333333333333333333333333";
+const EXECUTOR_ADDRESS = "0x4444444444444444444444444444444444444444";
+const FLASH_POOL_ADDRESS = "0x5555555555555555555555555555555555555555";
+const PATH = "0x01020304";
 
 const ctx = {
   poolState: {
@@ -25,68 +32,125 @@ const ctx = {
   chainName: "base",
 };
 
-describe("flash-arb strategy scaffold", () => {
-  it("estimates profit using gross spread minus slippage", () => {
-    const strategy = createFlashArbStrategy({
-      maxSlippagePercent: 1,
-      minLiquidityUsd: 100,
-      minProfitUsd: 0,
-      dryRun: true,
-    });
+function makeSubmitter(): MevSubmitter {
+  return {
+    name: "private-rpc",
+    supportsLiveSubmission: true,
+    submit: vi.fn().mockResolvedValue({
+      mode: "private-rpc",
+      txHash: `0x${"ab".repeat(32)}`,
+      privateSubmission: true,
+    }),
+    isHealthy: vi.fn().mockResolvedValue(true),
+  };
+}
 
-    expect(strategy.estimateProfit(ctx)).toBeCloseTo(0.295, 6);
-  });
+function makeStrategy({
+  dryRun = true,
+  amountOut = parseEther("60"),
+  slippagePercent = 0.5,
+} = {}) {
+  const publicClient = {
+    chain: BASE_CONFIG.chain,
+    readContract: vi.fn().mockResolvedValue(3000n),
+    simulateContract: vi.fn().mockResolvedValue({}),
+  };
+  const walletClient = {
+    account: { address: WALLET_ADDRESS },
+  };
+  const submitter = makeSubmitter();
 
-  it("never reports live executability from the scaffold", async () => {
-    const strategy = createFlashArbStrategy({
+  const strategy = createFlashArbStrategy(
+    publicClient as never,
+    walletClient as never,
+    submitter,
+    {
       maxSlippagePercent: 1,
-      minLiquidityUsd: 100,
+      minLiquidityUsd: 10,
       minProfitUsd: 0.1,
+      executorAddress: EXECUTOR_ADDRESS,
+      dryRun,
+      route: {
+        flashLoanPools: {
+          USDC: FLASH_POOL_ADDRESS,
+        },
+        quoteToAjnaPaths: {
+          USDC: PATH,
+        },
+      },
       dexQuoter: {
         quoteQuoteToAjna: async () => ({
-          amountOut: parseEther("13"),
+          amountOut,
           gasEstimate: 100000n,
-          idealAmountOut: 12.5,
-          actualAmountOut: 13,
-          slippagePercent: 0,
+          idealAmountOut: 62,
+          actualAmountOut: Number(amountOut) / 1e18,
+          slippagePercent,
         }),
       },
-      dryRun: true,
-    });
+    },
+  );
 
-    await expect(strategy.canExecute(ctx)).resolves.toBe(false);
+  return { strategy, publicClient, submitter };
+}
+
+describe("flash-arb strategy", () => {
+  it("estimates total profit after flash fee and slippage floor", async () => {
+    const { strategy } = makeStrategy();
+
+    await expect(strategy.estimateProfit(ctx)).resolves.toBeCloseTo(1.85, 6);
+  });
+
+  it("reports executability when the route is configured and profitable", async () => {
+    const { strategy } = makeStrategy();
+
+    await expect(strategy.canExecute(ctx)).resolves.toBe(true);
   });
 
   it("rejects candidates when quoted slippage exceeds the configured limit", async () => {
-    const strategy = createFlashArbStrategy({
-      maxSlippagePercent: 1,
-      minLiquidityUsd: 10,
-      minProfitUsd: 0,
-      dexQuoter: {
-        quoteQuoteToAjna: async () => ({
-          amountOut: parseEther("10"),
-          gasEstimate: 100000n,
-          idealAmountOut: 12.5,
-          actualAmountOut: 10,
-          slippagePercent: 20,
-        }),
-      },
-      dryRun: true,
-    });
+    const { strategy } = makeStrategy({ slippagePercent: 20 });
 
     await expect(strategy.canExecute(ctx)).resolves.toBe(false);
   });
 
-  it("throws a clear error when execute is called", async () => {
-    const strategy = createFlashArbStrategy({
-      maxSlippagePercent: 1,
-      minLiquidityUsd: 100,
-      minProfitUsd: 0,
-      dryRun: true,
-    });
+  it("simulates executor execution during dry runs", async () => {
+    const { strategy, publicClient } = makeStrategy();
 
-    await expect(strategy.execute(ctx)).rejects.toThrow(
-      "Flash-arb execution is not implemented yet",
+    const result = await strategy.execute(ctx);
+
+    expect(publicClient.simulateContract).toHaveBeenCalledWith(
+      expect.objectContaining({
+        address: EXECUTOR_ADDRESS,
+        functionName: "executeFlashArb",
+        account: WALLET_ADDRESS,
+        args: [
+          expect.objectContaining({
+            flashPool: FLASH_POOL_ADDRESS,
+            ajnaPool: ctx.poolState.pool,
+            quoteAmount: parseEther("25"),
+            borrowAmount: parseEther("50"),
+            swapPath: PATH,
+            profitRecipient: WALLET_ADDRESS,
+          }),
+        ],
+      }),
     );
+    expect(result.submissionMode).toBe("dry-run");
+    expect(result.profitUsd).toBeCloseTo(1.85, 6);
+  });
+
+  it("submits executor transactions through the mev submitter in live mode", async () => {
+    const { strategy, submitter } = makeStrategy({ dryRun: false });
+
+    const result = await strategy.execute(ctx);
+
+    expect(submitter.submit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: EXECUTOR_ADDRESS,
+        functionName: "executeFlashArb",
+        account: WALLET_ADDRESS,
+      }),
+    );
+    expect(result.submissionMode).toBe("private-rpc");
+    expect(result.privateSubmission).toBe(true);
   });
 });

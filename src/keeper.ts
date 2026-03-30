@@ -43,6 +43,15 @@ interface ChainKeeper {
   pools: Address[];
 }
 
+function getFlashArbRoute(
+  resolved: ResolvedChainConfig,
+  config: AppConfig,
+) {
+  return config.flashArb.routes[
+    resolved.chainConfig.name as keyof typeof config.flashArb.routes
+  ];
+}
+
 function createStrategy(
   resolved: ResolvedChainConfig,
   config: AppConfig,
@@ -51,16 +60,21 @@ function createStrategy(
   submitter: MevSubmitter,
 ): ExecutionStrategy {
   if (config.strategy === "flash-arb") {
-    const route = config.flashArb.routes[
-      resolved.chainConfig.name as keyof typeof config.flashArb.routes
-    ];
+    const route = getFlashArbRoute(resolved, config);
 
-    return createFlashArbStrategy({
+    return createFlashArbStrategy(publicClient, walletClient, submitter, {
       maxSlippagePercent: config.flashArb.maxSlippagePercent,
       minLiquidityUsd: config.flashArb.minLiquidityUsd,
       minProfitUsd: config.flashArb.minProfitUsd,
       executorAddress: config.flashArb.executorAddress,
       dryRun: config.dryRun,
+      route: route
+        ? {
+            executorAddress: route.executorAddress,
+            flashLoanPools: route.flashLoanPools,
+            quoteToAjnaPaths: route.quoteToAjnaPaths,
+          }
+        : undefined,
       dexQuoter: route
         ? createUniswapV3DexQuoter(publicClient, {
             quoterAddress: route.quoterAddress,
@@ -121,9 +135,20 @@ function createChainKeeper(
   }
 
   if (!config.dryRun && config.strategy === "flash-arb") {
-    throw new Error(
-      "Flash-arb execution is scaffolded but not implemented. Use dryRun: true for monitoring only.",
-    );
+    const route = getFlashArbRoute(resolved, config);
+    const executorAddress = route?.executorAddress || config.flashArb.executorAddress;
+
+    if (!route) {
+      throw new Error(
+        `Flash-arb route config is required for live ${resolved.chainConfig.name} execution.`,
+      );
+    }
+
+    if (!executorAddress) {
+      throw new Error(
+        `Flash-arb executorAddress is required for live ${resolved.chainConfig.name} execution.`,
+      );
+    }
   }
 
   const strategy = createStrategy(
@@ -224,7 +249,7 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
           chainName,
         };
 
-        const profit = strategy.estimateProfit(ctx);
+        const profit = await strategy.estimateProfit(ctx);
         const gasCheck = await checkGasPrice(
           publicClient,
           config.gasPriceCeilingGwei,

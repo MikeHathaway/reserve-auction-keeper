@@ -19,6 +19,12 @@ interface FundedStrategyConfig {
   dryRun: boolean;
 }
 
+interface FundedExecutionPlan {
+  amount: bigint;
+  ajnaCost: bigint;
+  profitUsd: number;
+}
+
 const ERC20_ABI = [
   {
     inputs: [{ name: "owner", type: "address" }, { name: "spender", type: "address" }],
@@ -51,6 +57,7 @@ export function createFundedStrategy(
   config: FundedStrategyConfig,
 ): ExecutionStrategy {
   const walletAddress = walletClient.account!.address;
+  let lastPlan: { key: string; plan: FundedExecutionPlan | null } | null = null;
 
   async function getAjnaBalance(): Promise<bigint> {
     return publicClient.readContract({
@@ -59,6 +66,66 @@ export function createFundedStrategy(
       functionName: "balanceOf",
       args: [walletAddress],
     });
+  }
+
+  function getContextKey(ctx: AuctionContext): string {
+    return [
+      ctx.chainName,
+      ctx.poolState.pool,
+      ctx.poolState.claimableReservesRemaining.toString(),
+      ctx.auctionPrice.toString(),
+      ctx.prices.quoteTokenPriceUsd.toString(),
+      ctx.prices.ajnaPriceUsd.toString(),
+    ].join(":");
+  }
+
+  async function getExecutionPlan(
+    ctx: AuctionContext,
+  ): Promise<FundedExecutionPlan | null> {
+    const key = getContextKey(ctx);
+    if (lastPlan?.key === key) {
+      return lastPlan.plan;
+    }
+
+    if (!ctx.poolState.hasActiveAuction || ctx.auctionPrice === 0n) {
+      lastPlan = { key, plan: null };
+      return null;
+    }
+
+    const balance = await getAjnaBalance();
+    if (balance === 0n) {
+      lastPlan = { key, plan: null };
+      return null;
+    }
+
+    const maxFromBalance = (balance * parseEther("1")) / ctx.auctionPrice;
+    let amount = maxFromBalance < ctx.poolState.claimableReservesRemaining
+      ? maxFromBalance
+      : ctx.poolState.claimableReservesRemaining;
+
+    if (config.maxTakeAmount && amount > config.maxTakeAmount) {
+      amount = config.maxTakeAmount;
+    }
+
+    if (amount === 0n) {
+      lastPlan = { key, plan: null };
+      return null;
+    }
+
+    const ajnaCost = (amount * ctx.auctionPrice) / parseEther("1");
+    const quoteValueUsd =
+      Number(formatEther(amount)) * ctx.prices.quoteTokenPriceUsd;
+    const ajnaCostUsd =
+      Number(formatEther(ajnaCost)) * ctx.prices.ajnaPriceUsd;
+
+    const plan = {
+      amount,
+      ajnaCost,
+      profitUsd: quoteValueUsd - ajnaCostUsd,
+    };
+
+    lastPlan = { key, plan };
+    return plan;
   }
 
   async function ensureApproval(pool: Address, amount: bigint): Promise<void> {
@@ -103,13 +170,12 @@ export function createFundedStrategy(
 
     async canExecute(ctx: AuctionContext): Promise<boolean> {
       const { poolState, auctionPrice, prices } = ctx;
+      const plan = await getExecutionPlan(ctx);
 
       if (!poolState.hasActiveAuction) return false;
       if (auctionPrice === 0n) return false;
 
-      // Check wallet balance
-      const balance = await getAjnaBalance();
-      if (balance === 0n) {
+      if (!plan) {
         logger.debug("Wallet has no AJNA balance", { chain: ctx.chainName });
         return false;
       }
@@ -139,33 +205,19 @@ export function createFundedStrategy(
 
     async execute(ctx: AuctionContext): Promise<TxResult> {
       const { poolState, auctionPrice, prices } = ctx;
-      const balance = await getAjnaBalance();
-
-      // amount = min(walletBalance / auctionPrice, unclaimed, maxTakeAmount)
-      // amount is in quote tokens. AJNA cost = amount * auctionPrice (in WAD terms)
-      const maxFromBalance = (balance * parseEther("1")) / auctionPrice;
-      let amount = maxFromBalance < poolState.claimableReservesRemaining
-        ? maxFromBalance
-        : poolState.claimableReservesRemaining;
-
-      if (config.maxTakeAmount && amount > config.maxTakeAmount) {
-        amount = config.maxTakeAmount;
-      }
-
-      if (amount === 0n) {
+      const plan = await getExecutionPlan(ctx);
+      if (!plan) {
         throw new Error("Calculated take amount is 0");
       }
 
-      const ajnaCost = (amount * auctionPrice) / parseEther("1");
-
       // Ensure approval
-      await ensureApproval(poolState.pool, ajnaCost);
+      await ensureApproval(poolState.pool, plan.ajnaCost);
 
       logger.info("Executing takeReserves", {
         pool: poolState.pool,
         chain: ctx.chainName,
-        quoteAmount: formatEther(amount),
-        ajnaCost: formatEther(ajnaCost),
+        quoteAmount: formatEther(plan.amount),
+        ajnaCost: formatEther(plan.ajnaCost),
         dryRun: config.dryRun,
       });
 
@@ -175,24 +227,24 @@ export function createFundedStrategy(
           address: poolState.pool,
           abi: POOL_ABI,
           functionName: "takeReserves",
-          args: [amount],
+          args: [plan.amount],
           account: walletAddress,
         });
 
         logger.info("DRY RUN: takeReserves simulation succeeded", {
           pool: poolState.pool,
           chain: ctx.chainName,
-          quoteAmount: formatEther(amount),
-          ajnaCost: formatEther(ajnaCost),
+          quoteAmount: formatEther(plan.amount),
+          ajnaCost: formatEther(plan.ajnaCost),
         });
 
         return {
           submissionMode: "dry-run",
           privateSubmission: false,
           pool: poolState.pool,
-          amountQuoteReceived: amount,
-          ajnaCost,
-          profitUsd: this.estimateProfit(ctx),
+          amountQuoteReceived: plan.amount,
+          ajnaCost: plan.ajnaCost,
+          profitUsd: plan.profitUsd,
           chain: ctx.chainName,
         };
       }
@@ -202,7 +254,7 @@ export function createFundedStrategy(
         to: poolState.pool,
         abi: POOL_ABI,
         functionName: "takeReserves",
-        args: [amount],
+        args: [plan.amount],
         account: walletAddress,
       });
 
@@ -213,8 +265,8 @@ export function createFundedStrategy(
         txHash: submission.txHash,
         bundleHash: submission.bundleHash,
         targetBlock: submission.targetBlock?.toString(),
-        quoteAmount: formatEther(amount),
-        ajnaCost: formatEther(ajnaCost),
+        quoteAmount: formatEther(plan.amount),
+        ajnaCost: formatEther(plan.ajnaCost),
       });
 
       return {
@@ -224,24 +276,16 @@ export function createFundedStrategy(
         targetBlock: submission.targetBlock,
         privateSubmission: submission.privateSubmission,
         pool: poolState.pool,
-        amountQuoteReceived: amount,
-        ajnaCost,
-        profitUsd: this.estimateProfit(ctx),
+        amountQuoteReceived: plan.amount,
+        ajnaCost: plan.ajnaCost,
+        profitUsd: plan.profitUsd,
         chain: ctx.chainName,
       };
     },
 
-    estimateProfit(ctx: AuctionContext): number {
-      const { auctionPrice, prices } = ctx;
-      const auctionPriceFloat = Number(formatEther(auctionPrice));
-      if (auctionPriceFloat === 0) return 0;
-
-      // Value received per AJNA spent (in USD)
-      const valuePerAjna = prices.quoteTokenPriceUsd / auctionPriceFloat;
-      // Cost per AJNA (in USD)
-      const costPerAjna = prices.ajnaPriceUsd;
-      // Profit per AJNA
-      return valuePerAjna - costPerAjna;
+    async estimateProfit(ctx: AuctionContext): Promise<number> {
+      const plan = await getExecutionPlan(ctx);
+      return plan?.profitUsd ?? 0;
     },
   };
 }

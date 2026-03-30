@@ -31,6 +31,6 @@ export interface ExecutionStrategy {
   /** Execute the strategy. Returns the transaction result. */
   execute(ctx: AuctionContext): Promise<TxResult>;
 
-  /** Estimate the profit in USD for this auction opportunity. */
-  estimateProfit(ctx: AuctionContext): number;
+  /** Estimate the total profit in USD for this auction opportunity. */
+  estimateProfit(ctx: AuctionContext): Promise<number>;
 }

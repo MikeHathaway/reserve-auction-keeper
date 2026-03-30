@@ -38,6 +38,7 @@ function makeContext(overrides: Partial<AuctionContext> = {}): AuctionContext {
 function makeSubmitter(): MevSubmitter {
   return {
     name: "private-rpc",
+    supportsLiveSubmission: true,
     submit: vi.fn(),
     isHealthy: vi.fn().mockResolvedValue(true),
   };
@@ -165,10 +166,10 @@ describe("funded strategy", () => {
     expect(publicClient.simulateContract).not.toHaveBeenCalled();
   });
 
-  it("estimateProfit uses the quote-token value minus AJNA cost", () => {
+  it("estimateProfit uses the total quote-token value minus AJNA cost", async () => {
     const publicClient = {
       chain: BASE_CONFIG.chain,
-      readContract: vi.fn(),
+      readContract: vi.fn().mockResolvedValue(parseEther("100")),
     };
     const walletClient = {
       account: { address: WALLET_ADDRESS },
@@ -187,6 +188,6 @@ describe("funded strategy", () => {
       },
     );
 
-    expect(strategy.estimateProfit(makeContext())).toBe(0.3);
+    await expect(strategy.estimateProfit(makeContext())).resolves.toBe(30);
   });
 });
