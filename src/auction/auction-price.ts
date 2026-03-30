@@ -2,6 +2,7 @@ import { type PublicClient, type Address, formatEther } from "viem";
 import { POOL_INFO_UTILS_ABI } from "../contracts/abis/index.js";
 import type { ChainConfig } from "../chains/index.js";
 import { logger } from "../utils/logger.js";
+import { retryAsync } from "../utils/retry.js";
 
 export interface AuctionPriceInfo {
   pool: Address;
@@ -21,12 +22,16 @@ export async function getAuctionPrice(
   chainConfig: ChainConfig,
   pool: Address,
 ): Promise<AuctionPriceInfo> {
-  const result = await client.readContract({
-    address: chainConfig.poolInfoUtils,
-    abi: POOL_INFO_UTILS_ABI,
-    functionName: "poolReservesInfo",
-    args: [pool],
-  });
+  const result = await retryAsync(
+    () =>
+      client.readContract({
+        address: chainConfig.poolInfoUtils,
+        abi: POOL_INFO_UTILS_ABI,
+        functionName: "poolReservesInfo",
+        args: [pool],
+      }),
+    { label: `${chainConfig.name}.poolReservesInfo` },
+  );
 
   const [, , , auctionPrice, timeRemaining] = result;
 
@@ -65,7 +70,10 @@ export async function getAuctionPrices(
     args: [pool] as const,
   }));
 
-  const results = await client.multicall({ contracts: calls });
+  const results = await retryAsync(
+    () => client.multicall({ contracts: calls }),
+    { label: `${chainConfig.name}.poolReservesInfo.multicall` },
+  );
   const priceMap = new Map<Address, AuctionPriceInfo>();
 
   for (let i = 0; i < pools.length; i++) {

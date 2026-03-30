@@ -8,6 +8,7 @@ import {
 } from "viem";
 import type { MevSubmitter, SubmitRequest } from "./mev-submitter.js";
 import { logger } from "../utils/logger.js";
+import { isTransientRpcError, retryAsync } from "../utils/retry.js";
 
 /**
  * Private RPC submitter for L2 chains (Base).
@@ -50,12 +51,19 @@ export function createPrivateRpcSubmitter(
         args: request.args,
       });
 
-      const hash = await walletClient.sendTransaction({
-        to: request.to,
-        data: calldata,
-        chain: publicClient.chain,
-        account: walletClient.account!,
-      });
+      const hash = await retryAsync(
+        () =>
+          walletClient.sendTransaction({
+            to: request.to,
+            data: calldata,
+            chain: publicClient.chain,
+            account: walletClient.account!,
+          }),
+        {
+          label: `private-rpc.submit.${request.functionName}`,
+          shouldRetry: isTransientRpcError,
+        },
+      );
 
       logger.info("Transaction submitted via private RPC", {
         hash,
@@ -73,7 +81,13 @@ export function createPrivateRpcSubmitter(
         const testClient = createPublicClient({
           transport: http(effectiveUrl),
         });
-        await testClient.getBlockNumber();
+        await retryAsync(
+          () => testClient.getBlockNumber(),
+          {
+            label: "private-rpc.health-check",
+            shouldRetry: isTransientRpcError,
+          },
+        );
         return true;
       } catch {
         return false;

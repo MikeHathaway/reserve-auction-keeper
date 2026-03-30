@@ -17,7 +17,11 @@ import type { ExecutionStrategy, AuctionContext } from "./strategies/interface.j
 import { createFlashbotsSubmitter } from "./execution/flashbots.js";
 import { createPrivateRpcSubmitter } from "./execution/private-rpc.js";
 import type { MevSubmitter } from "./execution/mev-submitter.js";
-import { checkGasPrice, isProfitableAfterGas } from "./execution/gas.js";
+import {
+  checkGasPrice,
+  isNearProfitableAfterGas,
+  isProfitableAfterGas,
+} from "./execution/gas.js";
 import { POOL_ABI } from "./contracts/abis/index.js";
 import { logger } from "./utils/logger.js";
 
@@ -175,8 +179,16 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
           config.gasPriceCeilingGwei,
         );
 
-        // Check if we're near profitability (within threshold)
-        if (profit > 0) anyNearProfitable = true;
+        if (
+          isNearProfitableAfterGas(
+            profit,
+            gasCheck.estimatedCostUsd,
+            config.profitMarginPercent,
+            config.polling.profitabilityThreshold,
+          )
+        ) {
+          anyNearProfitable = true;
+        }
 
         if (gasCheck.isAboveCeiling) continue;
 

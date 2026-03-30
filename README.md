@@ -99,6 +99,8 @@ For AJNA holders who want to exit their position into quote tokens at a specific
 | `gasPriceCeilingGwei` | `100` | Skip execution if gas exceeds this |
 | `polling.idleIntervalMs` | `60000` | Poll interval when no auction is near profitability |
 | `polling.activeIntervalMs` | `10000` | Poll interval when an auction is approaching target |
+| `polling.profitabilityThreshold` | `0.2` | Switch to active polling when projected profit is within 20% of the gas-adjusted target |
+| `alertWebhookUrl` | unset | Optional webhook for `alert` and `fatal` events |
 
 ## Safety
 

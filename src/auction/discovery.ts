@@ -7,6 +7,7 @@ import {
 import { POOL_FACTORY_ABI, POOL_ABI } from "../contracts/abis/index.js";
 import type { ChainConfig } from "../chains/index.js";
 import { logger } from "../utils/logger.js";
+import { retryAsync } from "../utils/retry.js";
 
 export interface PoolReserveState {
   pool: Address;
@@ -51,7 +52,10 @@ export async function discoverPools(
     client,
   });
 
-  const poolCount = await factory.read.getNumberOfDeployedPools();
+  const poolCount = await retryAsync(
+    () => factory.read.getNumberOfDeployedPools(),
+    { label: `${chainConfig.name}.getNumberOfDeployedPools` },
+  );
   logger.info("Found deployed pools", {
     chain: chainConfig.name,
     count: poolCount.toString(),
@@ -60,7 +64,12 @@ export async function discoverPools(
   if (poolCount === 0n) return [];
 
   // Batch-read pool addresses via multicall
-  const calls = [];
+  const calls: Array<{
+    address: Address;
+    abi: typeof POOL_FACTORY_ABI;
+    functionName: "deployedPoolsList";
+    args: readonly [bigint];
+  }> = [];
   for (let i = 0n; i < poolCount; i++) {
     calls.push({
       address: chainConfig.poolFactory,
@@ -70,7 +79,10 @@ export async function discoverPools(
     });
   }
 
-  const results = await client.multicall({ contracts: calls });
+  const results = await retryAsync(
+    () => client.multicall({ contracts: calls }),
+    { label: `${chainConfig.name}.deployedPoolsList` },
+  );
   const allPools: Address[] = [];
 
   for (const result of results) {
@@ -90,9 +102,10 @@ export async function discoverPools(
     functionName: "quoteTokenAddress" as const,
   }));
 
-  const quoteTokenResults = await client.multicall({
-    contracts: quoteTokenCalls,
-  });
+  const quoteTokenResults = await retryAsync(
+    () => client.multicall({ contracts: quoteTokenCalls }),
+    { label: `${chainConfig.name}.quoteTokenAddress` },
+  );
 
   const filteredPools: Address[] = [];
   for (let i = 0; i < allPools.length; i++) {
@@ -137,10 +150,14 @@ export async function getPoolReserveStates(
     functionName: "quoteTokenAddress" as const,
   }));
 
-  const [reservesResults, quoteTokenResults] = await Promise.all([
-    client.multicall({ contracts: reservesCalls }),
-    client.multicall({ contracts: quoteTokenCalls }),
-  ]);
+  const [reservesResults, quoteTokenResults] = await retryAsync(
+    () =>
+      Promise.all([
+        client.multicall({ contracts: reservesCalls }),
+        client.multicall({ contracts: quoteTokenCalls }),
+      ]),
+    { label: `${chainConfig.name}.getPoolReserveStates` },
+  );
 
   // Build reverse lookup: address → symbol
   const addressToSymbol: Record<string, string> = {};

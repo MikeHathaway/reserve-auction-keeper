@@ -8,6 +8,13 @@ export interface GasCheck {
   estimatedCostUsd: number;
 }
 
+export function getRequiredProfitUsd(
+  gasCostUsd: number,
+  profitMarginPercent: number,
+): number {
+  return gasCostUsd * (1 + profitMarginPercent / 100);
+}
+
 /**
  * Check current gas price against the configured ceiling.
  */
@@ -49,6 +56,21 @@ export function isProfitableAfterGas(
   gasCostUsd: number,
   profitMarginPercent: number,
 ): boolean {
-  const minProfit = gasCostUsd * (1 + profitMarginPercent / 100);
-  return estimatedProfitUsd > minProfit;
+  return estimatedProfitUsd > getRequiredProfitUsd(gasCostUsd, profitMarginPercent);
+}
+
+export function isNearProfitableAfterGas(
+  estimatedProfitUsd: number,
+  gasCostUsd: number,
+  profitMarginPercent: number,
+  profitabilityThreshold: number,
+): boolean {
+  const minProfit = getRequiredProfitUsd(gasCostUsd, profitMarginPercent);
+
+  if (minProfit === 0) {
+    return estimatedProfitUsd > 0;
+  }
+
+  const thresholdFloor = Math.max(0, 1 - profitabilityThreshold);
+  return estimatedProfitUsd >= minProfit * thresholdFloor;
 }

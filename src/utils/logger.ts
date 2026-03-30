@@ -10,9 +10,14 @@ const LEVEL_PRIORITY: Record<LogLevel, number> = {
 };
 
 let minLevel: LogLevel = "info";
+let alertWebhookUrl: string | undefined;
 
 export function setLogLevel(level: LogLevel) {
   minLevel = level;
+}
+
+export function setAlertWebhookUrl(webhookUrl?: string) {
+  alertWebhookUrl = webhookUrl;
 }
 
 function log(level: LogLevel, message: string, data?: Record<string, unknown>) {
@@ -31,6 +36,13 @@ function log(level: LogLevel, message: string, data?: Record<string, unknown>) {
     process.stderr.write(output + "\n");
   } else {
     process.stdout.write(output + "\n");
+  }
+
+  if ((level === "alert" || level === "fatal") && alertWebhookUrl) {
+    void sendWebhookAlert(alertWebhookUrl, message, {
+      level,
+      ...data,
+    });
   }
 }
 

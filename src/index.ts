@@ -2,7 +2,7 @@ import "dotenv/config";
 import { loadConfig } from "./config.js";
 import { startKeeper, requestShutdown } from "./keeper.js";
 import { startHealthCheck, stopHealthCheck } from "./utils/health.js";
-import { logger, setLogLevel } from "./utils/logger.js";
+import { logger, setAlertWebhookUrl, setLogLevel } from "./utils/logger.js";
 
 const CONFIG_PATH = process.env.CONFIG_PATH || "config.json";
 const LOG_LEVEL = process.env.LOG_LEVEL || "info";
@@ -32,6 +32,8 @@ async function main() {
     strategy: config.strategy,
     dryRun: config.dryRun,
   });
+
+  setAlertWebhookUrl(config.alertWebhookUrl);
 
   // Start health check server
   startHealthCheck(config.healthCheckPort);
