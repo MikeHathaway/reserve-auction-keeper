@@ -4,5 +4,6 @@ dist/
 config.json
 *.log
 cache/
+.cache/
 forge-out/
 broadcast/
