@@ -66,6 +66,15 @@ function makeStrategy({
     account: { address: WALLET_ADDRESS },
   };
   const submitter = makeSubmitter();
+  const dexQuoter = {
+    quoteQuoteToAjna: vi.fn(async (_symbol: string, _amountInWad: bigint, _quoteTokenScale: bigint) => ({
+      amountOut,
+      gasEstimate: 100000n,
+      idealAmountOut: 62,
+      actualAmountOut: Number(amountOut) / 1e18,
+      slippagePercent,
+    })),
+  };
 
   const strategy = createFlashArbStrategy(
     publicClient as never,
@@ -85,19 +94,11 @@ function makeStrategy({
           USDC: PATH,
         },
       },
-      dexQuoter: {
-        quoteQuoteToAjna: async () => ({
-          amountOut,
-          gasEstimate: 100000n,
-          idealAmountOut: 62,
-          actualAmountOut: Number(amountOut) / 1e18,
-          slippagePercent,
-        }),
-      },
+      dexQuoter,
     },
   );
 
-  return { strategy, publicClient, submitter };
+  return { strategy, publicClient, submitter, dexQuoter };
 }
 
 describe("flash-arb strategy", () => {
@@ -108,9 +109,15 @@ describe("flash-arb strategy", () => {
   });
 
   it("reports executability when the route is configured and profitable", async () => {
-    const { strategy } = makeStrategy();
+    const { strategy, dexQuoter } = makeStrategy();
 
     await expect(strategy.canExecute(makeContext())).resolves.toBe(true);
+    expect(dexQuoter.quoteQuoteToAjna).toHaveBeenCalledWith(
+      "USDC",
+      parseEther("25"),
+      1_000_000_000_000n,
+      expect.any(Object),
+    );
   });
 
   it("rejects candidates when quoted slippage exceeds the configured limit", async () => {

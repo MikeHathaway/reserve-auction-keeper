@@ -21,7 +21,7 @@ describe("uniswap v3 dex quoter", () => {
       label: "base.flashArb",
     });
 
-    const result = await quoter.quoteQuoteToAjna("USDC", parseEther("25"), {
+    const result = await quoter.quoteQuoteToAjna("USDC", parseEther("25"), 1_000_000_000_000n, {
       ajnaPriceUsd: 0.2,
       quoteTokenPriceUsd: 0.1,
       source: "coingecko",
@@ -34,7 +34,44 @@ describe("uniswap v3 dex quoter", () => {
       idealAmountOut: 12.5,
       actualAmountOut: 12,
     });
+    expect(publicClient.readContract).toHaveBeenCalledWith(
+      expect.objectContaining({
+        args: ["0x010203", 25_000_000n],
+      }),
+    );
     expect(result?.slippagePercent).toBeCloseTo(4, 6);
+  });
+
+  it("converts Ajna internal quote amounts to raw token units before quoting", async () => {
+    const publicClient = {
+      readContract: vi.fn().mockResolvedValue([
+        parseEther("12"),
+        [],
+        [],
+        150000n,
+      ]),
+    };
+
+    const quoter = createUniswapV3DexQuoter(publicClient as never, {
+      quoterAddress: "0x1111111111111111111111111111111111111111",
+      quoteToAjnaPaths: {
+        USDC: "0x010203",
+      },
+      label: "base.flashArb",
+    });
+
+    await quoter.quoteQuoteToAjna("USDC", parseEther("25"), 1_000_000_000_000n, {
+      ajnaPriceUsd: 0.2,
+      quoteTokenPriceUsd: 0.1,
+      source: "coingecko",
+      isStale: false,
+    });
+
+    expect(publicClient.readContract).toHaveBeenCalledWith(
+      expect.objectContaining({
+        args: ["0x010203", 25_000_000n],
+      }),
+    );
   });
 
   it("returns null when no route is configured for the quote token", async () => {
@@ -49,7 +86,7 @@ describe("uniswap v3 dex quoter", () => {
     });
 
     await expect(
-      quoter.quoteQuoteToAjna("DAI", parseEther("1"), {
+      quoter.quoteQuoteToAjna("DAI", parseEther("1"), 1n, {
         ajnaPriceUsd: 0.2,
         quoteTokenPriceUsd: 1,
         source: "coingecko",

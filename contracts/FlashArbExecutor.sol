@@ -11,6 +11,7 @@ interface IERC20Like {
 interface IAjnaPoolLike {
     function takeReserves(uint256 amount) external returns (uint256);
     function quoteTokenAddress() external view returns (address);
+    function quoteTokenScale() external view returns (uint256);
 }
 
 interface IUniswapV3FlashCallback {
@@ -42,6 +43,7 @@ contract FlashArbExecutor is IUniswapV3FlashCallback {
     error InvalidConfig();
     error InvalidFlashPool();
     error InvalidFactoryPool();
+    error InvalidQuoteAmount();
     error UnsupportedBorrowToken();
     error InsufficientRepayment();
 
@@ -129,14 +131,22 @@ contract FlashArbExecutor is IUniswapV3FlashCallback {
         uint256 quoteReceived = ajnaPool.takeReserves(params.quoteAmount);
 
         address quoteToken = ajnaPool.quoteTokenAddress();
-        _approveExact(quoteToken, swapRouter, quoteReceived);
+        uint256 quoteTokenScale = ajnaPool.quoteTokenScale();
+        if (quoteTokenScale == 0 || quoteReceived % quoteTokenScale != 0) {
+            revert InvalidQuoteAmount();
+        }
+
+        uint256 quoteTokenAmount = quoteReceived / quoteTokenScale;
+        if (quoteTokenAmount == 0) revert InvalidQuoteAmount();
+
+        _approveExact(quoteToken, swapRouter, quoteTokenAmount);
 
         uint256 amountOut = ISwapRouterLike(swapRouter).exactInput(
             ISwapRouterLike.ExactInputParams({
                 path: params.swapPath,
                 recipient: address(this),
                 deadline: block.timestamp,
-                amountIn: quoteReceived,
+                amountIn: quoteTokenAmount,
                 amountOutMinimum: params.minAjnaOut
             })
         );

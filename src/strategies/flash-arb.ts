@@ -210,6 +210,7 @@ export function createFlashArbStrategy(
     const quote = await config.dexQuoter.quoteQuoteToAjna(
       ctx.poolState.quoteTokenSymbol,
       quoteAmount,
+      ctx.poolState.quoteTokenScale,
       ctx.prices,
     );
     if (!quote) {

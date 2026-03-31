@@ -1,4 +1,5 @@
 import { formatEther, type Hex, type PublicClient } from "viem";
+import { toRawQuoteTokenAmount } from "../auction/math.js";
 import { logger } from "../utils/logger.js";
 import { retryAsync } from "../utils/retry.js";
 import type { PriceData } from "./oracle.js";
@@ -32,7 +33,8 @@ export interface DexQuote {
 export interface DexQuoter {
   quoteQuoteToAjna(
     quoteTokenSymbol: string,
-    amountIn: bigint,
+    amountInWad: bigint,
+    quoteTokenScale: bigint,
     prices: PriceData,
   ): Promise<DexQuote | null>;
 }
@@ -48,12 +50,23 @@ export function createUniswapV3DexQuoter(
   config: UniswapV3QuoterConfig,
 ): DexQuoter {
   return {
-    async quoteQuoteToAjna(quoteTokenSymbol, amountIn, prices) {
+    async quoteQuoteToAjna(quoteTokenSymbol, amountInWad, quoteTokenScale, prices) {
       const path = config.quoteToAjnaPaths[quoteTokenSymbol];
       if (!path) {
         logger.debug("No Uniswap V3 path configured for quote token", {
           label: config.label,
           quoteTokenSymbol,
+        });
+        return null;
+      }
+
+      const amountInRaw = toRawQuoteTokenAmount(amountInWad, quoteTokenScale);
+      if (amountInRaw === 0n) {
+        logger.debug("Quote amount rounds down to zero raw tokens", {
+          label: config.label,
+          quoteTokenSymbol,
+          amountInWad: amountInWad.toString(),
+          quoteTokenScale: quoteTokenScale.toString(),
         });
         return null;
       }
@@ -65,7 +78,7 @@ export function createUniswapV3DexQuoter(
               address: config.quoterAddress,
               abi: UNISWAP_V3_QUOTER_ABI,
               functionName: "quoteExactInput",
-              args: [path, amountIn],
+              args: [path, amountInRaw],
             }),
           {
             label: `${config.label}.quoteExactInput.${quoteTokenSymbol}`,
@@ -79,7 +92,7 @@ export function createUniswapV3DexQuoter(
           bigint,
         ];
 
-        const quoteAmount = Number(formatEther(amountIn));
+        const quoteAmount = Number(formatEther(amountInWad));
         const idealAmountOut =
           quoteAmount * (prices.quoteTokenPriceUsd / prices.ajnaPriceUsd);
         const actualAmountOut = Number(formatEther(amountOut));

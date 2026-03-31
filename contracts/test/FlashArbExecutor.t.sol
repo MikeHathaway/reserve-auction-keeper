@@ -5,6 +5,7 @@ import {FlashArbExecutor} from "../FlashArbExecutor.sol";
 import {TestBase} from "./TestBase.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockAjnaPool} from "./mocks/MockAjnaPool.sol";
+import {MockMalformedAjnaPool} from "./mocks/MockMalformedAjnaPool.sol";
 import {MockSwapRouter} from "./mocks/MockSwapRouter.sol";
 import {MockUniswapV3Factory} from "./mocks/MockUniswapV3Factory.sol";
 import {MockUniswapV3Pool} from "./mocks/MockUniswapV3Pool.sol";
@@ -12,6 +13,9 @@ import {MockUniswapV3Pool} from "./mocks/MockUniswapV3Pool.sol";
 contract FlashArbExecutorTest is TestBase {
     uint256 internal constant WAD = 1e18;
     uint24 internal constant POOL_FEE = 3000;
+    uint256 internal constant QUOTE_TOKEN_SCALE = 1e12;
+    uint256 internal constant QUOTE_TOKEN_RAW = 50 * 1e6;
+    uint256 internal constant QUOTE_TOKEN_WAD = QUOTE_TOKEN_RAW * QUOTE_TOKEN_SCALE;
 
     MockERC20 internal ajna;
     MockERC20 internal quote;
@@ -36,13 +40,13 @@ contract FlashArbExecutorTest is TestBase {
             address(factory),
             keccak256(type(MockUniswapV3Pool).creationCode)
         );
-        ajnaPool = new MockAjnaPool(address(ajna), address(quote), 2 * WAD);
+        ajnaPool = new MockAjnaPool(address(ajna), address(quote), QUOTE_TOKEN_SCALE, 2 * WAD);
         flashPool = MockUniswapV3Pool(
             factory.createPool(address(ajna), address(quote), POOL_FEE, 1 * WAD, 0)
         );
 
         ajna.mint(address(flashPool), 200 * WAD);
-        quote.mint(address(ajnaPool), 50 * WAD);
+        quote.mint(address(ajnaPool), QUOTE_TOKEN_RAW);
         ajna.mint(address(router), 105 * WAD);
     }
 
@@ -53,7 +57,7 @@ contract FlashArbExecutorTest is TestBase {
             flashPool: address(flashPool),
             ajnaPool: address(ajnaPool),
             borrowAmount: 100 * WAD,
-            quoteAmount: 50 * WAD,
+            quoteAmount: QUOTE_TOKEN_WAD,
             swapPath: hex"010203",
             minAjnaOut: 104 * WAD,
             profitRecipient: profitRecipient
@@ -62,10 +66,10 @@ contract FlashArbExecutorTest is TestBase {
         executor.executeFlashArb(params);
 
         assertEq(ajna.balanceOf(address(flashPool)), 201 * WAD, "flash pool repaid with fee");
-        assertEq(quote.balanceOf(address(router)), 50 * WAD, "router received quote");
+        assertEq(quote.balanceOf(address(router)), QUOTE_TOKEN_RAW, "router received raw quote");
         assertEq(ajna.balanceOf(profitRecipient), 4 * WAD, "profit recipient received profit");
         assertEq(ajna.balanceOf(address(ajnaPool)), 100 * WAD, "ajna pool burned borrowed ajna");
-        assertEq(router.lastAmountIn(), 50 * WAD, "router swap consumed quote amount");
+        assertEq(router.lastAmountIn(), QUOTE_TOKEN_RAW, "router swap consumed raw quote amount");
     }
 
     function test_uniswapV3FlashCallback_revertsForNonPoolCaller() public {
@@ -90,7 +94,7 @@ contract FlashArbExecutorTest is TestBase {
             flashPool: address(flashPool),
             ajnaPool: address(ajnaPool),
             borrowAmount: 100 * WAD,
-            quoteAmount: 50 * WAD,
+            quoteAmount: QUOTE_TOKEN_WAD,
             swapPath: hex"010203",
             minAjnaOut: 100 * WAD,
             profitRecipient: profitRecipient
@@ -132,7 +136,7 @@ contract FlashArbExecutorTest is TestBase {
             flashPool: address(roguePool),
             ajnaPool: address(ajnaPool),
             borrowAmount: 100 * WAD,
-            quoteAmount: 50 * WAD,
+            quoteAmount: QUOTE_TOKEN_WAD,
             swapPath: hex"010203",
             minAjnaOut: 104 * WAD,
             profitRecipient: profitRecipient
@@ -155,6 +159,28 @@ contract FlashArbExecutorTest is TestBase {
 
         vm.prank(address(0xCAFE));
         vm.expectRevert(abi.encodeWithSelector(FlashArbExecutor.Unauthorized.selector));
+        executor.executeFlashArb(params);
+    }
+
+    function test_executeFlashArb_revertsForNonIntegralQuoteAmount() public {
+        router.setNextAmountOut(105 * WAD);
+        MockMalformedAjnaPool malformedPool = new MockMalformedAjnaPool(
+            address(quote),
+            QUOTE_TOKEN_SCALE,
+            QUOTE_TOKEN_WAD + 1
+        );
+
+        FlashArbExecutor.ExecuteParams memory params = FlashArbExecutor.ExecuteParams({
+            flashPool: address(flashPool),
+            ajnaPool: address(malformedPool),
+            borrowAmount: 100 * WAD,
+            quoteAmount: QUOTE_TOKEN_WAD,
+            swapPath: hex"010203",
+            minAjnaOut: 104 * WAD,
+            profitRecipient: profitRecipient
+        });
+
+        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutor.InvalidQuoteAmount.selector));
         executor.executeFlashArb(params);
     }
 }
