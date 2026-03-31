@@ -135,6 +135,41 @@ describe("funded strategy", () => {
     expect(result.ajnaCost).toBe(parseEther("60"));
   });
 
+  it("rounds AJNA cost up so live approval matches pool burn requirements", async () => {
+    const publicClient = {
+      chain: BASE_CONFIG.chain,
+      readContract: vi.fn().mockResolvedValue(parseEther("1000")),
+      simulateContract: vi.fn().mockResolvedValue({}),
+    };
+    const walletClient = {
+      account: { address: WALLET_ADDRESS },
+    };
+
+    const strategy = createFundedStrategy(
+      publicClient as never,
+      walletClient as never,
+      BASE_CONFIG.ajnaToken,
+      makeSubmitter(),
+      {
+        targetExitPriceUsd: 0,
+        maxTakeAmount: 1n,
+        autoApprove: false,
+        profitMarginPercent: 0,
+        dryRun: true,
+      },
+    );
+
+    const result = await strategy.execute(makeContext({
+      poolState: {
+        ...makeContext().poolState,
+        claimableReservesRemaining: 1n,
+      },
+      auctionPrice: parseEther("1") + 1n,
+    }));
+
+    expect(result.ajnaCost).toBe(2n);
+  });
+
   it("execute fails fast when allowance is insufficient and autoApprove is disabled", async () => {
     const publicClient = {
       chain: BASE_CONFIG.chain,

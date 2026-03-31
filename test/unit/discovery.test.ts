@@ -88,6 +88,22 @@ describe("discovery", () => {
       hasActiveAuction: false,
       isKickable: true,
     });
+    expect(client.multicall).toHaveBeenNthCalledWith(1, {
+      contracts: [
+        {
+          address: BASE_CONFIG.poolInfoUtils,
+          abi: expect.any(Array),
+          functionName: "poolReservesInfo",
+          args: [POOL_A],
+        },
+        {
+          address: BASE_CONFIG.poolInfoUtils,
+          abi: expect.any(Array),
+          functionName: "poolReservesInfo",
+          args: [POOL_B],
+        },
+      ],
+    });
   });
 
   it("retries reserve-state reads when RPC calls fail transiently", async () => {

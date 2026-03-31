@@ -49,6 +49,11 @@ const ERC20_ABI = [
   },
 ] as const;
 
+function ceilWmul(left: bigint, right: bigint): bigint {
+  const wad = parseEther("1");
+  return (left * right + wad - 1n) / wad;
+}
+
 export function createFundedStrategy(
   publicClient: PublicClient,
   walletClient: WalletClient,
@@ -112,7 +117,7 @@ export function createFundedStrategy(
       return null;
     }
 
-    const ajnaCost = (amount * ctx.auctionPrice) / parseEther("1");
+    const ajnaCost = ceilWmul(amount, ctx.auctionPrice);
     const quoteValueUsd =
       Number(formatEther(amount)) * ctx.prices.quoteTokenPriceUsd;
     const ajnaCostUsd =

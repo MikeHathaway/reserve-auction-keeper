@@ -4,7 +4,7 @@ import {
   getContract,
   formatEther,
 } from "viem";
-import { POOL_FACTORY_ABI, POOL_ABI } from "../contracts/abis/index.js";
+import { POOL_FACTORY_ABI, POOL_ABI, POOL_INFO_UTILS_ABI } from "../contracts/abis/index.js";
 import type { ChainConfig } from "../chains/index.js";
 import { logger } from "../utils/logger.js";
 import { retryAsync } from "../utils/retry.js";
@@ -137,11 +137,12 @@ export async function getPoolReserveStates(
 ): Promise<PoolReserveState[]> {
   if (pools.length === 0) return [];
 
-  // Multicall: reservesInfo for each pool + quoteTokenAddress
+  // Multicall: PoolInfoUtils.poolReservesInfo(pool) + quoteTokenAddress
   const reservesCalls = pools.map((pool) => ({
-    address: pool,
-    abi: POOL_ABI,
-    functionName: "reservesInfo" as const,
+    address: chainConfig.poolInfoUtils,
+    abi: POOL_INFO_UTILS_ABI,
+    functionName: "poolReservesInfo" as const,
+    args: [pool] as const,
   }));
 
   const quoteTokenCalls = pools.map((pool) => ({

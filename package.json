@@ -9,8 +9,9 @@
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "test": "vitest run",
-    "test:contracts": "forge test --offline --no-match-path contracts/test/FlashArbExecutor.mainnet-fork.t.sol",
-    "test:contracts:fork:mainnet": "forge test --match-path contracts/test/FlashArbExecutor.mainnet-fork.t.sol --fork-url ${MAINNET_RPC_URL:?MAINNET_RPC_URL is required}",
+    "test:integration:mainnet": "vitest run --config vitest.integration.config.ts",
+    "test:contracts": "node scripts/run-contract-tests.mjs",
+    "test:contracts:fork:mainnet": "node scripts/run-mainnet-fork-tests.mjs",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
   },
