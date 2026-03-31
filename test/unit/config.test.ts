@@ -10,6 +10,7 @@ const CONFIG_FILE = join(TMP_DIR, "test-config.json");
 const DEFAULT_PRIVATE_KEY = "0x" + "ab".repeat(32);
 const DEFAULT_FLASHBOTS_AUTH_KEY = "0x" + "cd".repeat(32);
 const KEYSTORE_PASSWORD = "correct horse battery staple";
+const TEST_SCRYPT_MAXMEM_BYTES = 512 * 1024 * 1024;
 
 function writeConfig(config: object) {
   if (!existsSync(TMP_DIR)) mkdirSync(TMP_DIR, { recursive: true });
@@ -23,13 +24,18 @@ function writeSecretFile(filename: string, contents: string): string {
   return filePath;
 }
 
-function buildKeystore(privateKey: string, password: string): string {
+function buildKeystore(
+  privateKey: string,
+  password: string,
+  scryptParams: { n: number; r: number; p: number } = { n: 1024, r: 8, p: 1 },
+): string {
   const salt = Buffer.from("11".repeat(32), "hex");
   const iv = Buffer.from("22".repeat(16), "hex");
   const derivedKey = scryptSync(password, salt, 32, {
-    N: 1024,
-    r: 8,
-    p: 1,
+    N: scryptParams.n,
+    r: scryptParams.r,
+    p: scryptParams.p,
+    maxmem: TEST_SCRYPT_MAXMEM_BYTES,
   });
 
   const cipher = createCipheriv(
@@ -57,9 +63,9 @@ function buildKeystore(privateKey: string, password: string): string {
       kdfparams: {
         dklen: 32,
         salt: salt.toString("hex"),
-        n: 1024,
-        r: 8,
-        p: 1,
+        n: scryptParams.n,
+        r: scryptParams.r,
+        p: scryptParams.p,
       },
       mac,
     },
@@ -260,6 +266,31 @@ describe("config", () => {
     );
     process.env.KEYSTORE_PASSWORD_FILE = writeSecretFile(
       "trading.keystore.password",
+      `${KEYSTORE_PASSWORD}\n`,
+    );
+    writeConfig({
+      chains: {
+        base: { enabled: true, rpcUrl: "https://base-rpc.example.com" },
+      },
+      funded: { targetExitPriceUsd: 0.1 },
+    });
+
+    const config = loadConfig(CONFIG_FILE);
+    expect(config.secrets.privateKey).toBe(DEFAULT_PRIVATE_KEY);
+  });
+
+  it("loads KEYSTORE_PATH with realistic scrypt parameters", () => {
+    delete process.env.PRIVATE_KEY;
+    process.env.KEYSTORE_PATH = writeSecretFile(
+      "trading.realistic.keystore.json",
+      buildKeystore(DEFAULT_PRIVATE_KEY, KEYSTORE_PASSWORD, {
+        n: 262144,
+        r: 8,
+        p: 1,
+      }),
+    );
+    process.env.KEYSTORE_PASSWORD_FILE = writeSecretFile(
+      "trading.realistic.keystore.password",
       `${KEYSTORE_PASSWORD}\n`,
     );
     writeConfig({

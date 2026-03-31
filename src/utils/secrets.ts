@@ -10,6 +10,8 @@ import { keccak256, type Hex } from "viem";
 
 const PRIVATE_KEY_REGEX = /^0x[0-9a-fA-F]{64}$/;
 const HEX_REGEX = /^[0-9a-fA-F]+$/;
+const SCRYPT_MAXMEM_LIMIT_BYTES = 512 * 1024 * 1024;
+const SCRYPT_MAXMEM_HEADROOM_BYTES = 32 * 1024 * 1024;
 
 interface KeystoreCrypto {
   cipher?: string;
@@ -50,6 +52,14 @@ function ensureHex(label: string, value: string): string {
 
 function parseHexBytes(label: string, value: string): Buffer {
   return Buffer.from(ensureHex(label, value), "hex");
+}
+
+function parsePositiveInteger(label: string, value: unknown): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`Unsupported keystore: ${label} must be a positive integer`);
+  }
+  return parsed;
 }
 
 export function normalizePrivateKey(value: string, label: string): Hex {
@@ -101,29 +111,42 @@ function getKeystorePassword(env: NodeJS.ProcessEnv): string {
 
 function deriveScryptKey(kdfparams: Record<string, unknown>, password: string): Buffer {
   const salt = String(kdfparams.salt ?? "");
-  const dklen = Number(kdfparams.dklen);
-  const n = Number(kdfparams.n);
-  const r = Number(kdfparams.r);
-  const p = Number(kdfparams.p);
+  const dklen = parsePositiveInteger("keystore.kdfparams.dklen", kdfparams.dklen);
+  const n = parsePositiveInteger("keystore.kdfparams.n", kdfparams.n);
+  const r = parsePositiveInteger("keystore.kdfparams.r", kdfparams.r);
+  const p = parsePositiveInteger("keystore.kdfparams.p", kdfparams.p);
 
-  if (!salt || !Number.isFinite(dklen) || !Number.isFinite(n) || !Number.isFinite(r) || !Number.isFinite(p)) {
+  if (!salt) {
     throw new Error("Unsupported keystore: invalid scrypt parameters");
   }
+
+  const estimatedMemoryBytes =
+    128n * BigInt(n) * BigInt(r) + 1024n * BigInt(r) * BigInt(p);
+  const maxmemLimit = BigInt(SCRYPT_MAXMEM_LIMIT_BYTES);
+  if (estimatedMemoryBytes > maxmemLimit) {
+    throw new Error("Unsupported keystore: scrypt parameters exceed memory limit");
+  }
+
+  const requestedMaxmem = estimatedMemoryBytes + BigInt(SCRYPT_MAXMEM_HEADROOM_BYTES);
+  const maxmem = Number(
+    requestedMaxmem > maxmemLimit ? maxmemLimit : requestedMaxmem,
+  );
 
   return scryptSync(password, parseHexBytes("keystore.kdfparams.salt", salt), dklen, {
     N: n,
     r,
     p,
+    maxmem,
   });
 }
 
 function derivePbkdf2Key(kdfparams: Record<string, unknown>, password: string): Buffer {
   const salt = String(kdfparams.salt ?? "");
-  const dklen = Number(kdfparams.dklen);
-  const iterations = Number(kdfparams.c);
+  const dklen = parsePositiveInteger("keystore.kdfparams.dklen", kdfparams.dklen);
+  const iterations = parsePositiveInteger("keystore.kdfparams.c", kdfparams.c);
   const prf = String(kdfparams.prf ?? "");
 
-  if (!salt || !Number.isFinite(dklen) || !Number.isFinite(iterations) || !prf) {
+  if (!salt || !prf) {
     throw new Error("Unsupported keystore: invalid pbkdf2 parameters");
   }
 
