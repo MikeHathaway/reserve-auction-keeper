@@ -143,7 +143,16 @@ Recommended Docker secret pattern:
    # KEYSTORE_PATH=/run/secrets/trading.keystore.json
    # KEYSTORE_PASSWORD_FILE=/run/secrets/trading.keystore.password
    ```
-3. Uncomment the matching bind mounts in [`docker/docker-compose.yml`](docker/docker-compose.yml).
+3. Copy [`docker/docker-compose.secrets.example.yml`](docker/docker-compose.secrets.example.yml) to `docker/docker-compose.override.yml` and edit the host-side bind mount paths if needed.
+4. Start Compose with the override:
+   ```bash
+   docker compose \
+     -f docker/docker-compose.yml \
+     -f docker/docker-compose.override.yml \
+     up -d --build
+   ```
+
+`docker/docker-compose.override.yml` is ignored by git so each operator can keep machine-specific secret paths locally.
 
 ### systemd
 

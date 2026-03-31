@@ -8,6 +8,7 @@ services:
       - ../config.json:/app/config.json:ro
       - keeper-cache:/app/.cache/pool-discovery
       # Optional secret mounts. Pair these with *_FILE or KEYSTORE_* paths in ../.env.
+      # For a local operator override template, see docker/docker-compose.secrets.example.yml.
       # - ../secrets/trading.key:/run/secrets/trading.key:ro
       # - ../secrets/flashbots-auth.key:/run/secrets/flashbots-auth.key:ro
       # - ../secrets/trading.keystore.json:/run/secrets/trading.keystore.json:ro

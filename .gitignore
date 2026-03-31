@@ -3,6 +3,7 @@ dist/
 .env
 config.json
 secrets/
+docker/docker-compose.override.yml
 *.log
 cache/
 .cache/
