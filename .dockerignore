@@ -1,0 +1,18 @@
+.git
+.gitignore
+.context
+.claude
+.cache
+cache
+dist
+node_modules
+forge-out
+broadcast
+test
+contracts
+scripts
+Ajna Reserve Auction Bot Spec-3.pdf
+description.txt
+.env
+config.json
+*.log

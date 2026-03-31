@@ -3,12 +3,19 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
+    init: true
     volumes:
       - ../config.json:/app/config.json:ro
-      - ../.env:/app/.env:ro
+      - keeper-cache:/app/.cache/pool-discovery
     ports:
       - "8080:8080"
     restart: unless-stopped
+    stop_grace_period: 35s
+    env_file:
+      - ../.env
     environment:
-      - CONFIG_PATH=/app/config.json
-      - LOG_LEVEL=info
+      CONFIG_PATH: /app/config.json
+      LOG_LEVEL: info
+
+volumes:
+  keeper-cache:

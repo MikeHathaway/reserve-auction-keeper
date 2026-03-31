@@ -100,8 +100,37 @@ npm run test:contracts:fork:mainnet
 ### Docker
 
 ```bash
-cd docker
-docker compose up -d
+docker compose -f docker/docker-compose.yml up -d --build
+```
+
+This runs the keeper as a long-lived service with:
+
+- `config.json` mounted read-only at `/app/config.json`
+- secrets loaded from your local `.env` via Compose `env_file`
+- a named Docker volume mounted at `/app/.cache/pool-discovery` so pool auto-discovery stays warm across restarts
+- the existing `/health` endpoint exposed on port `8080`
+
+### systemd
+
+For a Linux box that should start the Dockerized keeper on boot, use the sample unit in [`deploy/systemd/reserve-auction-keeper-compose.service`](deploy/systemd/reserve-auction-keeper-compose.service).
+
+Assuming the repo lives at `/opt/reserve-auction-keeper`:
+
+```bash
+sudo cp deploy/systemd/reserve-auction-keeper-compose.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now reserve-auction-keeper-compose.service
+sudo systemctl status reserve-auction-keeper-compose.service
+```
+
+If your checkout path is not `/opt/reserve-auction-keeper`, edit the unit's `WorkingDirectory` first.
+
+Useful commands:
+
+```bash
+sudo systemctl restart reserve-auction-keeper-compose.service
+sudo journalctl -u reserve-auction-keeper-compose.service -f
+docker compose -f /opt/reserve-auction-keeper/docker/docker-compose.yml logs -f keeper
 ```
 
 ## Configuration
@@ -154,11 +183,12 @@ Flash-arb borrows AJNA or bwAJNA from a configured Uniswap V3 pool, calls `takeR
 - **Dry run by default.** The bot will not execute any transactions until you set `dryRun: false`.
 - **Use a dedicated hot wallet.** Never use your main wallet. Fund it with only the AJNA you're willing to trade.
 - **Mainnet live mode uses single-tx Flashbots bundles.** The keeper prepares, signs, simulates, and submits a raw bundle, then retries across up to 3 target blocks.
-- **Base live mode uses private RPC when configured.** Without `privateRpcUrl`, the submitter degrades to public mempool mode and logs a warning.
+- **Base and other `private-rpc` chains fail closed without a private RPC URL.** Live submission is disabled instead of silently degrading to public mempool.
 - **Flash-arb requires a deployed executor contract.** The keeper will refuse live flash-arb mode if the chain route or executor address is missing.
 - **Flash-arb callback verification is factory-hardened.** The executor checks the callback sender against the configured Uniswap V3 factory and pool init code hash before repaying any flash loan.
 - **Gas ceiling.** The bot skips execution during gas spikes.
 - **Health check.** HTTP endpoint at `/health` (default port 8080) for monitoring.
+- **Pool discovery is cached locally.** Auto-discovered pool lists are persisted under `.cache/pool-discovery` to make restarts and periodic rediscovery cheaper.
 
 ## Architecture
 
