@@ -40,4 +40,11 @@ export const POOL_ABI = [
     stateMutability: "view",
     type: "function",
   },
+  {
+    inputs: [],
+    name: "quoteTokenScale",
+    outputs: [{ name: "", type: "uint256" }],
+    stateMutability: "view",
+    type: "function",
+  },
 ] as const;

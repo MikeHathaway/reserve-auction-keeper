@@ -21,6 +21,25 @@ const REQUEST = {
 } as const;
 
 describe("private-rpc submitter", () => {
+  it("rejects live submission when no private RPC URL is configured", async () => {
+    const walletClient = {
+      account: { address: REQUEST.account },
+      sendTransaction: vi.fn(),
+    };
+    const publicClient = { chain: base };
+
+    const submitter = createPrivateRpcSubmitter(
+      publicClient as never,
+      walletClient as never,
+    );
+
+    expect(submitter.supportsLiveSubmission).toBe(false);
+    await expect(submitter.submit(REQUEST)).rejects.toThrow(
+      "Private RPC URL is required for live private-rpc submission.",
+    );
+    expect(walletClient.sendTransaction).not.toHaveBeenCalled();
+  });
+
   it("retries transient submission failures", async () => {
     const walletClient = {
       account: { address: REQUEST.account },
@@ -35,15 +54,17 @@ describe("private-rpc submitter", () => {
     const submitter = createPrivateRpcSubmitter(
       publicClient as never,
       walletClient as never,
+      "https://private-rpc.example",
     );
+    vi.spyOn(submitter, "isHealthy").mockResolvedValue(true);
 
     const submission = await submitter.submit(REQUEST);
 
     expect(submission).toEqual({
       mode: "private-rpc",
       txHash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      privateSubmission: false,
-      relayUrl: undefined,
+      privateSubmission: true,
+      relayUrl: "https://private-rpc.example",
     });
     expect(walletClient.sendTransaction).toHaveBeenCalledTimes(2);
   });
@@ -58,7 +79,9 @@ describe("private-rpc submitter", () => {
     const submitter = createPrivateRpcSubmitter(
       publicClient as never,
       walletClient as never,
+      "https://private-rpc.example",
     );
+    vi.spyOn(submitter, "isHealthy").mockResolvedValue(true);
 
     await expect(submitter.submit(REQUEST)).rejects.toThrow("insufficient funds");
     expect(walletClient.sendTransaction).toHaveBeenCalledTimes(1);

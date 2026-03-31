@@ -1,11 +1,47 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+import { parseGwei } from "viem";
 import {
+  checkGasPrice,
   getRequiredProfitUsd,
   isNearProfitableAfterGas,
   isProfitableAfterGas,
 } from "../../src/execution/gas.js";
 
 describe("gas", () => {
+  describe("checkGasPrice", () => {
+    it("uses the configured native token price for USD estimation", async () => {
+      const client = {
+        getGasPrice: vi.fn().mockResolvedValue(parseGwei("50")),
+      };
+
+      const gasCheck = await checkGasPrice(
+        client as never,
+        100,
+        200_000n,
+        1,
+      );
+
+      expect(gasCheck.estimatedCostUsd).toBeCloseTo(0.01, 6);
+      expect(gasCheck.isAboveCeiling).toBe(false);
+    });
+
+    it("marks gas above the ceiling and scales cost with higher native token prices", async () => {
+      const client = {
+        getGasPrice: vi.fn().mockResolvedValue(parseGwei("150")),
+      };
+
+      const gasCheck = await checkGasPrice(
+        client as never,
+        100,
+        200_000n,
+        2000,
+      );
+
+      expect(gasCheck.estimatedCostUsd).toBeCloseTo(60, 6);
+      expect(gasCheck.isAboveCeiling).toBe(true);
+    });
+  });
+
   describe("getRequiredProfitUsd", () => {
     it("calculates the profit floor including margin", () => {
       expect(getRequiredProfitUsd(2, 5)).toBe(2.1);

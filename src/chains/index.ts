@@ -16,6 +16,8 @@ export interface ChainConfig {
   };
   /** MEV submission method */
   mevMethod: "flashbots" | "private-rpc";
+  /** Native gas token USD price used for runtime gas-cost estimation */
+  nativeTokenPriceUsd: number;
   /** Average gas cost in USD for profitability estimates */
   estimatedGasCostUsd: number;
   /** Default public RPC (used if no provider key or explicit URL given) */
@@ -65,6 +67,7 @@ export const MAINNET_CONFIG: ChainConfig = {
     },
   },
   mevMethod: "flashbots",
+  nativeTokenPriceUsd: 2000,
   estimatedGasCostUsd: 5.0,
   defaultRpcUrl: "https://eth.llamarpc.com",
   alchemySlug: "eth-mainnet",
@@ -92,6 +95,7 @@ export const BASE_CONFIG: ChainConfig = {
     },
   },
   mevMethod: "private-rpc",
+  nativeTokenPriceUsd: 2000,
   estimatedGasCostUsd: 0.02,
   defaultRpcUrl: "https://base.llamarpc.com",
   alchemySlug: "base-mainnet",
@@ -119,6 +123,7 @@ export const ARBITRUM_CONFIG: ChainConfig = {
     },
   },
   mevMethod: "private-rpc",
+  nativeTokenPriceUsd: 2000,
   estimatedGasCostUsd: 0.02,
   defaultRpcUrl: "https://arb1.arbitrum.io/rpc",
   alchemySlug: "arb-mainnet",
@@ -146,6 +151,7 @@ export const OPTIMISM_CONFIG: ChainConfig = {
     },
   },
   mevMethod: "private-rpc",
+  nativeTokenPriceUsd: 2000,
   estimatedGasCostUsd: 0.01,
   defaultRpcUrl: "https://mainnet.optimism.io",
   alchemySlug: "opt-mainnet",
@@ -173,6 +179,7 @@ export const POLYGON_CONFIG: ChainConfig = {
     },
   },
   mevMethod: "private-rpc",
+  nativeTokenPriceUsd: 1,
   estimatedGasCostUsd: 0.01,
   defaultRpcUrl: "https://polygon-rpc.com",
   alchemySlug: "polygon-mainnet",

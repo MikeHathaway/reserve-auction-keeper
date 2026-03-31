@@ -12,6 +12,7 @@ import { retryAsync } from "../utils/retry.js";
 export interface PoolReserveState {
   pool: Address;
   quoteToken: Address;
+  quoteTokenScale: bigint;
   quoteTokenSymbol: string;
   reserves: bigint;
   claimableReserves: bigint;
@@ -151,11 +152,18 @@ export async function getPoolReserveStates(
     functionName: "quoteTokenAddress" as const,
   }));
 
-  const [reservesResults, quoteTokenResults] = await retryAsync(
+  const quoteScaleCalls = pools.map((pool) => ({
+    address: pool,
+    abi: POOL_ABI,
+    functionName: "quoteTokenScale" as const,
+  }));
+
+  const [reservesResults, quoteTokenResults, quoteScaleResults] = await retryAsync(
     () =>
       Promise.all([
         client.multicall({ contracts: reservesCalls }),
         client.multicall({ contracts: quoteTokenCalls }),
+        client.multicall({ contracts: quoteScaleCalls }),
       ]),
     { label: `${chainConfig.name}.getPoolReserveStates` },
   );
@@ -171,8 +179,13 @@ export async function getPoolReserveStates(
   for (let i = 0; i < pools.length; i++) {
     const reserveResult = reservesResults[i];
     const quoteResult = quoteTokenResults[i];
+    const quoteScaleResult = quoteScaleResults[i];
 
-    if (reserveResult.status !== "success" || quoteResult.status !== "success") {
+    if (
+      reserveResult.status !== "success" ||
+      quoteResult.status !== "success" ||
+      quoteScaleResult.status !== "success"
+    ) {
       logger.warn("Failed to read pool state", {
         pool: pools[i],
         chain: chainConfig.name,
@@ -184,6 +197,7 @@ export async function getPoolReserveStates(
       reserveResult.result as [bigint, bigint, bigint, bigint, bigint];
 
     const quoteToken = quoteResult.result as Address;
+    const quoteTokenScale = quoteScaleResult.result as bigint;
     const quoteTokenSymbol = addressToSymbol[quoteToken.toLowerCase()] || "UNKNOWN";
 
     const hasActiveAuction = claimableReservesRemaining > 0n && timeRemaining > 0n;
@@ -203,6 +217,7 @@ export async function getPoolReserveStates(
     states.push({
       pool: pools[i],
       quoteToken,
+      quoteTokenScale,
       quoteTokenSymbol,
       reserves,
       claimableReserves,

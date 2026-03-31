@@ -66,6 +66,10 @@ describe("discovery", () => {
         .mockResolvedValueOnce([
           { status: "success", result: BASE_CONFIG.quoteTokens.USDC },
           { status: "success", result: BASE_CONFIG.quoteTokens.WETH },
+        ])
+        .mockResolvedValueOnce([
+          { status: "success", result: 1_000_000_000_000n },
+          { status: "success", result: 1n },
         ]),
     };
 
@@ -78,12 +82,14 @@ describe("discovery", () => {
     expect(states).toHaveLength(2);
     expect(states[0]).toMatchObject({
       pool: POOL_A,
+      quoteTokenScale: 1_000_000_000_000n,
       quoteTokenSymbol: "USDC",
       hasActiveAuction: true,
       isKickable: false,
     });
     expect(states[1]).toMatchObject({
       pool: POOL_B,
+      quoteTokenScale: 1n,
       quoteTokenSymbol: "WETH",
       hasActiveAuction: false,
       isKickable: true,
@@ -104,12 +110,27 @@ describe("discovery", () => {
         },
       ],
     });
+    expect(client.multicall).toHaveBeenNthCalledWith(3, {
+      contracts: [
+        {
+          address: POOL_A,
+          abi: expect.any(Array),
+          functionName: "quoteTokenScale",
+        },
+        {
+          address: POOL_B,
+          abi: expect.any(Array),
+          functionName: "quoteTokenScale",
+        },
+      ],
+    });
   });
 
   it("retries reserve-state reads when RPC calls fail transiently", async () => {
     const client = {
       multicall: vi.fn()
         .mockRejectedValueOnce(new Error("rpc timeout"))
+        .mockResolvedValueOnce([])
         .mockResolvedValueOnce([])
         .mockResolvedValueOnce([
           {
@@ -125,6 +146,9 @@ describe("discovery", () => {
         ])
         .mockResolvedValueOnce([
           { status: "success", result: BASE_CONFIG.quoteTokens.USDC },
+        ])
+        .mockResolvedValueOnce([
+          { status: "success", result: 1_000_000_000_000n },
         ]),
     };
 
@@ -135,6 +159,6 @@ describe("discovery", () => {
     );
 
     expect(states).toHaveLength(1);
-    expect(client.multicall).toHaveBeenCalledTimes(4);
+    expect(client.multicall).toHaveBeenCalledTimes(6);
   });
 });

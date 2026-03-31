@@ -177,8 +177,12 @@ async function scanBlock(client, pools, blockNumber) {
 
   candidates.sort((left, right) => {
     if (left.kind !== right.kind) return left.kind === "active" ? -1 : 1;
-    const leftClaimable = BigInt(left.claimableReservesRemaining || left.claimableReserves);
-    const rightClaimable = BigInt(right.claimableReservesRemaining || right.claimableReserves);
+    const leftClaimable = left.kind === "active"
+      ? BigInt(left.claimableReservesRemaining)
+      : BigInt(left.claimableReserves);
+    const rightClaimable = right.kind === "active"
+      ? BigInt(right.claimableReservesRemaining)
+      : BigInt(right.claimableReserves);
     if (leftClaimable === rightClaimable) return 0;
     return leftClaimable > rightClaimable ? -1 : 1;
   });

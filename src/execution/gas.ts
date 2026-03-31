@@ -22,14 +22,14 @@ export async function checkGasPrice(
   client: PublicClient,
   ceilingGwei: number,
   estimatedGasUnits: bigint = 200_000n,
-  ethPriceUsd: number = 2000,
+  nativeTokenPriceUsd: number = 2000,
 ): Promise<GasCheck> {
   const gasPrice = await client.getGasPrice();
   const gasPriceGwei = Number(formatGwei(gasPrice));
 
   const estimatedCostWei = gasPrice * estimatedGasUnits;
   const estimatedCostEth = Number(estimatedCostWei) / 1e18;
-  const estimatedCostUsd = estimatedCostEth * ethPriceUsd;
+  const estimatedCostUsd = estimatedCostEth * nativeTokenPriceUsd;
 
   const isAboveCeiling = gasPriceGwei > ceilingGwei;
 

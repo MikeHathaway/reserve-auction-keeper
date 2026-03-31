@@ -19,31 +19,33 @@ export function createPrivateRpcSubmitter(
   walletClient: WalletClient,
   privateRpcUrl?: string,
 ): MevSubmitter {
-  // If no private RPC URL, fall back to the regular RPC
-  // but log a warning about MEV exposure
   const effectiveUrl = privateRpcUrl;
 
   if (!effectiveUrl) {
     logger.warn(
-      "No private RPC URL configured. Transactions will be sent to public mempool. MEV protection is NOT active.",
+      "No private RPC URL configured. Live private-rpc submission is disabled.",
     );
   }
 
   return {
     name: "private-rpc",
-    supportsLiveSubmission: true,
+    supportsLiveSubmission: !!effectiveUrl,
 
     async submit(request: SubmitRequest) {
+      if (!effectiveUrl) {
+        throw new Error(
+          "Private RPC URL is required for live private-rpc submission.",
+        );
+      }
+
       // Health check before submitting
-      if (effectiveUrl) {
-        const healthy = await this.isHealthy();
-        if (!healthy) {
-          logger.alert(
-            "Private RPC is unhealthy. Aborting transaction to avoid public mempool exposure.",
-            { privateRpcUrl: effectiveUrl },
-          );
-          throw new Error("Private RPC unhealthy, aborting to protect against MEV");
-        }
+      const healthy = await this.isHealthy();
+      if (!healthy) {
+        logger.alert(
+          "Private RPC is unhealthy. Aborting transaction to avoid public mempool exposure.",
+          { privateRpcUrl: effectiveUrl },
+        );
+        throw new Error("Private RPC unhealthy, aborting to protect against MEV");
       }
 
       const calldata = encodeFunctionData({
@@ -81,7 +83,7 @@ export function createPrivateRpcSubmitter(
     },
 
     async isHealthy(): Promise<boolean> {
-      if (!effectiveUrl) return true; // No private RPC = use public (degraded mode)
+      if (!effectiveUrl) return false;
 
       try {
         const testClient = createPublicClient({

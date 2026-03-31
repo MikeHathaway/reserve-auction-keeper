@@ -38,19 +38,27 @@ async function main() {
   // Start health check server
   startHealthCheck(config.healthCheckPort);
 
+  let forcedShutdownTimer: ReturnType<typeof setTimeout> | undefined;
+  let shutdownInitiated = false;
+
   // Graceful shutdown handler
   const shutdown = async () => {
+    if (shutdownInitiated) return;
+    shutdownInitiated = true;
     requestShutdown();
     // Give loops 30 seconds to finish their current cycle
-    setTimeout(async () => {
+    forcedShutdownTimer = setTimeout(async () => {
       logger.warn("Forced shutdown after timeout");
       await stopHealthCheck();
       process.exit(1);
     }, 30_000);
+    forcedShutdownTimer.unref?.();
   };
 
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
+
+  let exitCode = 0;
 
   try {
     await startKeeper(config);
@@ -58,10 +66,17 @@ async function main() {
     logger.fatal("Keeper crashed", {
       error: error instanceof Error ? error.message : String(error),
     });
-    process.exit(1);
+    exitCode = 1;
   }
 
+  if (forcedShutdownTimer) {
+    clearTimeout(forcedShutdownTimer);
+  }
   await stopHealthCheck();
+
+  if (exitCode !== 0) {
+    process.exit(exitCode);
+  }
   logger.info("Keeper stopped cleanly");
 }
 

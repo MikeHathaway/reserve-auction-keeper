@@ -14,6 +14,7 @@ function makeContext(overrides: Partial<AuctionContext> = {}): AuctionContext {
     poolState: {
       pool: POOL_ADDRESS,
       quoteToken: QUOTE_TOKEN,
+      quoteTokenScale: 1_000_000_000_000n,
       quoteTokenSymbol: "USDC",
       reserves: parseEther("100"),
       claimableReserves: parseEther("100"),
@@ -48,7 +49,9 @@ describe("funded strategy", () => {
   it("canExecute returns true when the target exit price is met", async () => {
     const publicClient = {
       chain: BASE_CONFIG.chain,
-      readContract: vi.fn().mockResolvedValue(parseEther("100")),
+      readContract: vi.fn()
+        .mockResolvedValueOnce(parseEther("100"))
+        .mockResolvedValueOnce(parseEther("100")),
     };
     const walletClient = {
       account: { address: WALLET_ADDRESS },
@@ -93,6 +96,60 @@ describe("funded strategy", () => {
     );
 
     await expect(strategy.canExecute(makeContext())).resolves.toBe(false);
+  });
+
+  it("canExecute returns false when allowance is insufficient and autoApprove is disabled", async () => {
+    const publicClient = {
+      chain: BASE_CONFIG.chain,
+      readContract: vi.fn()
+        .mockResolvedValueOnce(parseEther("100"))
+        .mockResolvedValueOnce(0n),
+    };
+    const walletClient = {
+      account: { address: WALLET_ADDRESS },
+    };
+
+    const strategy = createFundedStrategy(
+      publicClient as never,
+      walletClient as never,
+      BASE_CONFIG.ajnaToken,
+      makeSubmitter(),
+      {
+        targetExitPriceUsd: 0.1,
+        autoApprove: false,
+        profitMarginPercent: 5,
+        dryRun: true,
+      },
+    );
+
+    await expect(strategy.canExecute(makeContext())).resolves.toBe(false);
+  });
+
+  it("canExecute stays true when live autoApprove can satisfy missing allowance", async () => {
+    const publicClient = {
+      chain: BASE_CONFIG.chain,
+      readContract: vi.fn()
+        .mockResolvedValueOnce(parseEther("100"))
+        .mockResolvedValueOnce(0n),
+    };
+    const walletClient = {
+      account: { address: WALLET_ADDRESS },
+    };
+
+    const strategy = createFundedStrategy(
+      publicClient as never,
+      walletClient as never,
+      BASE_CONFIG.ajnaToken,
+      makeSubmitter(),
+      {
+        targetExitPriceUsd: 0.1,
+        autoApprove: true,
+        profitMarginPercent: 5,
+        dryRun: false,
+      },
+    );
+
+    await expect(strategy.canExecute(makeContext())).resolves.toBe(true);
   });
 
   it("execute uses the configured maxTakeAmount during dry runs", async () => {
@@ -162,12 +219,86 @@ describe("funded strategy", () => {
     const result = await strategy.execute(makeContext({
       poolState: {
         ...makeContext().poolState,
+        quoteTokenScale: 1n,
         claimableReservesRemaining: 1n,
       },
       auctionPrice: parseEther("1") + 1n,
     }));
 
     expect(result.ajnaCost).toBe(2n);
+  });
+
+  it("rounds down the take amount to whole quote token units", async () => {
+    const publicClient = {
+      chain: BASE_CONFIG.chain,
+      readContract: vi.fn()
+        .mockResolvedValueOnce(parseEther("1000"))
+        .mockResolvedValueOnce(parseEther("1000")),
+      simulateContract: vi.fn().mockResolvedValue({}),
+    };
+    const walletClient = {
+      account: { address: WALLET_ADDRESS },
+    };
+
+    const strategy = createFundedStrategy(
+      publicClient as never,
+      walletClient as never,
+      BASE_CONFIG.ajnaToken,
+      makeSubmitter(),
+      {
+        targetExitPriceUsd: 0,
+        autoApprove: false,
+        profitMarginPercent: 0,
+        dryRun: true,
+      },
+    );
+
+    const amountWithDust = parseEther("1") + 123n;
+    const result = await strategy.execute(makeContext({
+      poolState: {
+        ...makeContext().poolState,
+        claimableReservesRemaining: amountWithDust,
+      },
+      auctionPrice: parseEther("1"),
+    }));
+
+    expect(publicClient.simulateContract).toHaveBeenCalledWith(
+      expect.objectContaining({
+        args: [parseEther("1")],
+      }),
+    );
+    expect(result.amountQuoteReceived).toBe(parseEther("1"));
+  });
+
+  it("recomputes the execution plan when AJNA balance changes for the same auction", async () => {
+    const publicClient = {
+      chain: BASE_CONFIG.chain,
+      readContract: vi.fn()
+        .mockResolvedValueOnce(parseEther("10"))
+        .mockResolvedValueOnce(parseEther("100")),
+    };
+    const walletClient = {
+      account: { address: WALLET_ADDRESS },
+    };
+
+    const strategy = createFundedStrategy(
+      publicClient as never,
+      walletClient as never,
+      BASE_CONFIG.ajnaToken,
+      makeSubmitter(),
+      {
+        targetExitPriceUsd: 0,
+        autoApprove: false,
+        profitMarginPercent: 0,
+        dryRun: true,
+      },
+    );
+
+    const firstProfit = await strategy.estimateProfit(makeContext());
+    const secondProfit = await strategy.estimateProfit(makeContext());
+
+    expect(secondProfit).toBeGreaterThan(firstProfit);
+    expect(publicClient.readContract).toHaveBeenCalledTimes(2);
   });
 
   it("execute fails fast when allowance is insufficient and autoApprove is disabled", async () => {

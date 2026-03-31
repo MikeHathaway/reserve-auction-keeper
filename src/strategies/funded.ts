@@ -9,6 +9,10 @@ import {
 import type { ExecutionStrategy, AuctionContext, TxResult } from "./interface.js";
 import type { MevSubmitter } from "../execution/mev-submitter.js";
 import { POOL_ABI } from "../contracts/abis/index.js";
+import {
+  calculateReserveTakeAjnaCost,
+  normalizeReserveTakeAmount,
+} from "../auction/math.js";
 import { logger } from "../utils/logger.js";
 
 interface FundedStrategyConfig {
@@ -49,11 +53,6 @@ const ERC20_ABI = [
   },
 ] as const;
 
-function ceilWmul(left: bigint, right: bigint): bigint {
-  const wad = parseEther("1");
-  return (left * right + wad - 1n) / wad;
-}
-
 export function createFundedStrategy(
   publicClient: PublicClient,
   walletClient: WalletClient,
@@ -62,7 +61,9 @@ export function createFundedStrategy(
   config: FundedStrategyConfig,
 ): ExecutionStrategy {
   const walletAddress = walletClient.account!.address;
-  let lastPlan: { key: string; plan: FundedExecutionPlan | null } | null = null;
+  let lastPlan:
+    | { key: string; balance: bigint; plan: FundedExecutionPlan | null }
+    | null = null;
 
   async function getAjnaBalance(): Promise<bigint> {
     return publicClient.readContract({
@@ -71,6 +72,36 @@ export function createFundedStrategy(
       functionName: "balanceOf",
       args: [walletAddress],
     });
+  }
+
+  async function getAllowance(pool: Address): Promise<bigint> {
+    return publicClient.readContract({
+      address: ajnaToken,
+      abi: ERC20_ABI,
+      functionName: "allowance",
+      args: [walletAddress, pool],
+    });
+  }
+
+  async function canSatisfyAllowance(
+    pool: Address,
+    amount: bigint,
+  ): Promise<boolean> {
+    const allowance = await getAllowance(pool);
+    if (allowance >= amount) return true;
+
+    if (config.autoApprove && !config.dryRun) {
+      return true;
+    }
+
+    logger.debug("Skipping funded execution due to insufficient allowance", {
+      pool,
+      required: formatEther(amount),
+      current: formatEther(allowance),
+      autoApprove: config.autoApprove,
+      dryRun: config.dryRun,
+    });
+    return false;
   }
 
   function getContextKey(ctx: AuctionContext): string {
@@ -88,18 +119,18 @@ export function createFundedStrategy(
     ctx: AuctionContext,
   ): Promise<FundedExecutionPlan | null> {
     const key = getContextKey(ctx);
-    if (lastPlan?.key === key) {
+    const balance = await getAjnaBalance();
+    if (lastPlan?.key === key && lastPlan.balance === balance) {
       return lastPlan.plan;
     }
 
     if (!ctx.poolState.hasActiveAuction || ctx.auctionPrice === 0n) {
-      lastPlan = { key, plan: null };
+      lastPlan = { key, balance, plan: null };
       return null;
     }
 
-    const balance = await getAjnaBalance();
     if (balance === 0n) {
-      lastPlan = { key, plan: null };
+      lastPlan = { key, balance, plan: null };
       return null;
     }
 
@@ -112,12 +143,14 @@ export function createFundedStrategy(
       amount = config.maxTakeAmount;
     }
 
+    amount = normalizeReserveTakeAmount(amount, ctx.poolState.quoteTokenScale);
+
     if (amount === 0n) {
-      lastPlan = { key, plan: null };
+      lastPlan = { key, balance, plan: null };
       return null;
     }
 
-    const ajnaCost = ceilWmul(amount, ctx.auctionPrice);
+    const ajnaCost = calculateReserveTakeAjnaCost(amount, ctx.auctionPrice);
     const quoteValueUsd =
       Number(formatEther(amount)) * ctx.prices.quoteTokenPriceUsd;
     const ajnaCostUsd =
@@ -129,17 +162,12 @@ export function createFundedStrategy(
       profitUsd: quoteValueUsd - ajnaCostUsd,
     };
 
-    lastPlan = { key, plan };
+    lastPlan = { key, balance, plan };
     return plan;
   }
 
   async function ensureApproval(pool: Address, amount: bigint): Promise<void> {
-    const allowance = await publicClient.readContract({
-      address: ajnaToken,
-      abi: ERC20_ABI,
-      functionName: "allowance",
-      args: [walletAddress, pool],
-    });
+    const allowance = await getAllowance(pool);
 
     if (allowance >= amount) return;
 
@@ -204,7 +232,10 @@ export function createFundedStrategy(
       if (auctionPrice === 0n) return false;
 
       if (!plan) {
-        logger.debug("Wallet has no AJNA balance", { chain: ctx.chainName });
+        logger.debug("No executable funded plan for current auction", {
+          chain: ctx.chainName,
+          pool: poolState.pool,
+        });
         return false;
       }
 
@@ -228,7 +259,9 @@ export function createFundedStrategy(
         });
       }
 
-      return meetsTarget;
+      if (!meetsTarget) return false;
+
+      return canSatisfyAllowance(poolState.pool, plan.ajnaCost);
     },
 
     async execute(ctx: AuctionContext): Promise<TxResult> {

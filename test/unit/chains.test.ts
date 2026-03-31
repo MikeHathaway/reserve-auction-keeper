@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { MAINNET_CONFIG, BASE_CONFIG, CHAIN_CONFIGS } from "../../src/chains/index.js";
+import {
+  MAINNET_CONFIG,
+  BASE_CONFIG,
+  POLYGON_CONFIG,
+  CHAIN_CONFIGS,
+} from "../../src/chains/index.js";
 import { isAddress } from "viem";
 
 describe("chains", () => {
@@ -47,5 +52,12 @@ describe("chains", () => {
     expect(MAINNET_CONFIG.estimatedGasCostUsd).toBeGreaterThan(
       BASE_CONFIG.estimatedGasCostUsd,
     );
+  });
+
+  it("polygon uses a lower native-token USD price than ETH chains", () => {
+    expect(POLYGON_CONFIG.nativeTokenPriceUsd).toBeLessThan(
+      MAINNET_CONFIG.nativeTokenPriceUsd,
+    );
+    expect(BASE_CONFIG.nativeTokenPriceUsd).toBe(MAINNET_CONFIG.nativeTokenPriceUsd);
   });
 });

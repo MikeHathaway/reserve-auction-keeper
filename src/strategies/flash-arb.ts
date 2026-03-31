@@ -1,7 +1,6 @@
 import {
   type Address,
   formatEther,
-  parseEther,
   type Hex,
   type PublicClient,
   type WalletClient,
@@ -9,6 +8,10 @@ import {
 import type { AuctionContext, ExecutionStrategy, TxResult } from "./interface.js";
 import type { MevSubmitter } from "../execution/mev-submitter.js";
 import { FLASH_ARB_EXECUTOR_ABI } from "../contracts/abis/index.js";
+import {
+  calculateReserveTakeAjnaCost,
+  normalizeReserveTakeAmount,
+} from "../auction/math.js";
 import { logger } from "../utils/logger.js";
 import type { DexQuoter } from "../pricing/uniswap-v3.js";
 
@@ -22,7 +25,6 @@ const UNISWAP_V3_POOL_ABI = [
   },
 ] as const;
 
-const WAD = parseEther("1");
 const UNISWAP_FEE_DENOMINATOR = 1_000_000n;
 const SLIPPAGE_BPS_DENOMINATOR = 10_000n;
 
@@ -82,6 +84,7 @@ export function createFlashArbStrategy(
       ctx.chainName,
       ctx.poolState.pool,
       ctx.poolState.quoteTokenSymbol,
+      ctx.poolState.quoteTokenScale.toString(),
       ctx.poolState.claimableReservesRemaining.toString(),
       ctx.auctionPrice.toString(),
       ctx.prices.quoteTokenPriceUsd.toString(),
@@ -188,7 +191,15 @@ export function createFlashArbStrategy(
       return null;
     }
 
-    const quoteAmount = ctx.poolState.claimableReservesRemaining;
+    const quoteAmount = normalizeReserveTakeAmount(
+      ctx.poolState.claimableReservesRemaining,
+      ctx.poolState.quoteTokenScale,
+    );
+    if (quoteAmount === 0n) {
+      lastCandidate = { key, candidate: null };
+      return null;
+    }
+
     const liquidityUsd =
       Number(formatEther(quoteAmount)) * ctx.prices.quoteTokenPriceUsd;
     if (liquidityUsd < config.minLiquidityUsd) {
@@ -217,7 +228,10 @@ export function createFlashArbStrategy(
       return null;
     }
 
-    const borrowAmount = (quoteAmount * ctx.auctionPrice) / WAD;
+    const borrowAmount = calculateReserveTakeAjnaCost(
+      quoteAmount,
+      ctx.auctionPrice,
+    );
     if (borrowAmount === 0n) {
       lastCandidate = { key, candidate: null };
       return null;
@@ -333,7 +347,7 @@ export function createFlashArbStrategy(
           privateSubmission: false,
           pool: ctx.poolState.pool,
           amountQuoteReceived: candidate.quoteAmount,
-          ajnaCost: candidate.borrowAmount,
+          ajnaCost: candidate.repayAmount,
           profitUsd: candidate.estimatedProfitUsd,
           chain: ctx.chainName,
         };
@@ -355,7 +369,7 @@ export function createFlashArbStrategy(
         privateSubmission: submission.privateSubmission,
         pool: ctx.poolState.pool,
         amountQuoteReceived: candidate.quoteAmount,
-        ajnaCost: candidate.borrowAmount,
+        ajnaCost: candidate.repayAmount,
         profitUsd: candidate.estimatedProfitUsd,
         chain: ctx.chainName,
       };

@@ -223,6 +223,15 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
         chainConfig.chainConfig,
         activePools,
       );
+      const priceCache = new Map<string, ReturnType<typeof oracle.getPrices>>();
+      const gasCheckPromise = activeAuctions.length > 0
+        ? checkGasPrice(
+            publicClient,
+            config.gasPriceCeilingGwei,
+            200_000n,
+            chainConfig.chainConfig.nativeTokenPriceUsd,
+          )
+        : null;
 
       // 4. Evaluate and execute on each active auction
       let anyNearProfitable = false;
@@ -231,7 +240,13 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
         const priceInfo = auctionPrices.get(poolState.pool);
         if (!priceInfo) continue;
 
-        const prices = await oracle.getPrices(poolState.quoteTokenSymbol);
+        let pricesPromise = priceCache.get(poolState.quoteTokenSymbol);
+        if (!pricesPromise) {
+          pricesPromise = oracle.getPrices(poolState.quoteTokenSymbol);
+          priceCache.set(poolState.quoteTokenSymbol, pricesPromise);
+        }
+
+        const prices = await pricesPromise;
         if (!prices) continue;
 
         if (prices.isStale) {
@@ -250,10 +265,7 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
         };
 
         const profit = await strategy.estimateProfit(ctx);
-        const gasCheck = await checkGasPrice(
-          publicClient,
-          config.gasPriceCeilingGwei,
-        );
+        const gasCheck = await gasCheckPromise!;
 
         if (
           isNearProfitableAfterGas(
@@ -367,17 +379,28 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
   logger.info("Chain loop stopped", { chain: chainName });
 }
 
-function sleep(ms: number): Promise<void> {
+export function sleep(
+  ms: number,
+  shouldWake: () => boolean = () => shutdownRequested,
+  wakeCheckIntervalMs: number = 1000,
+): Promise<void> {
   return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    // Allow immediate wake on shutdown
+    let settled = false;
+
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      clearInterval(check);
+      resolve();
+    };
+
+    const timer = setTimeout(finish, ms);
     const check = setInterval(() => {
-      if (shutdownRequested) {
-        clearTimeout(timer);
-        clearInterval(check);
-        resolve();
+      if (shouldWake()) {
+        finish();
       }
-    }, 1000);
+    }, wakeCheckIntervalMs);
   });
 }
 
