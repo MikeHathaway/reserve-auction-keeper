@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { isAddress, type Address, type Hex } from "viem";
 import { CHAIN_CONFIGS, buildRpcUrl, type ChainConfig, type RpcProvider } from "./chains/index.js";
 import { loadOptionalHexSecret, resolvePrivateKeyFromEnv } from "./utils/secrets.js";
+import type { PriceProvider } from "./pricing/oracle.js";
 
 const addressSchema = z.string().refine(isAddress, "Invalid Ethereum address");
 const hexSchema = z.string().regex(/^0x[0-9a-fA-F]*$/, "Invalid hex string");
@@ -28,6 +29,11 @@ const configFileSchema = z.object({
     optimism: chainConfigSchema.optional(),
     polygon: chainConfigSchema.optional(),
   }),
+  pricing: z
+    .object({
+      provider: z.enum(["coingecko", "alchemy", "dual"]).default("coingecko"),
+    })
+    .optional(),
   strategy: z.enum(["funded", "flash-arb"]).default("funded"),
   funded: z
     .object({
@@ -71,7 +77,8 @@ export type ConfigFile = z.infer<typeof configFileSchema>;
 
 export interface EnvSecrets {
   privateKey: Hex;
-  coingeckoApiKey: string;
+  coingeckoApiKey?: string;
+  alchemyApiKey?: string;
   rpcProvider?: RpcProvider;
   rpcApiKey?: string;
   flashbotsAuthKey?: Hex;
@@ -87,6 +94,9 @@ export interface ResolvedChainConfig {
 export interface AppConfig {
   chains: ResolvedChainConfig[];
   strategy: "funded" | "flash-arb";
+  pricing: {
+    provider: PriceProvider;
+  };
   funded: {
     targetExitPriceUsd: number;
     maxTakeAmount?: bigint;
@@ -120,18 +130,29 @@ export interface AppConfig {
   secrets: EnvSecrets;
 }
 
-function loadEnvSecrets(): EnvSecrets {
-  const coingeckoApiKey = process.env.COINGECKO_API_KEY;
-  if (!coingeckoApiKey) throw new Error("COINGECKO_API_KEY is required in .env");
-
+function loadEnvSecrets(priceProvider: PriceProvider): EnvSecrets {
   // RPC provider: set RPC_PROVIDER (alchemy|infura) + RPC_API_KEY
   // and URLs are auto-constructed for all chains.
   const rpcProvider = process.env.RPC_PROVIDER as RpcProvider | undefined;
   const rpcApiKey = process.env.RPC_API_KEY;
+  const coingeckoApiKey = process.env.COINGECKO_API_KEY;
+  const alchemyApiKey = process.env.ALCHEMY_API_KEY ||
+    (rpcProvider === "alchemy" ? rpcApiKey : undefined);
+
+  if ((priceProvider === "coingecko" || priceProvider === "dual") && !coingeckoApiKey) {
+    throw new Error("COINGECKO_API_KEY is required for the selected pricing provider");
+  }
+
+  if ((priceProvider === "alchemy" || priceProvider === "dual") && !alchemyApiKey) {
+    throw new Error(
+      "ALCHEMY_API_KEY is required for the selected pricing provider unless RPC_PROVIDER=alchemy with RPC_API_KEY set",
+    );
+  }
 
   return {
     privateKey: resolvePrivateKeyFromEnv(process.env),
     coingeckoApiKey,
+    alchemyApiKey,
     rpcProvider,
     rpcApiKey,
     flashbotsAuthKey: loadOptionalHexSecret(
@@ -145,7 +166,8 @@ function loadEnvSecrets(): EnvSecrets {
 export function loadConfig(configPath: string): AppConfig {
   const raw = readFileSync(configPath, "utf-8");
   const parsed = configFileSchema.parse(JSON.parse(raw));
-  const secrets = loadEnvSecrets();
+  const pricing = parsed.pricing || { provider: "coingecko" as const };
+  const secrets = loadEnvSecrets(pricing.provider);
 
   const chains: ResolvedChainConfig[] = [];
 
@@ -196,6 +218,7 @@ export function loadConfig(configPath: string): AppConfig {
   return {
     chains,
     strategy: parsed.strategy,
+    pricing,
     funded: {
       targetExitPriceUsd: funded.targetExitPriceUsd,
       maxTakeAmount: funded.maxTakeAmount ? BigInt(funded.maxTakeAmount) : undefined,

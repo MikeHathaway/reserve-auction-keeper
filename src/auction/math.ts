@@ -28,6 +28,15 @@ export function toRawQuoteTokenAmount(
   return wadAmount / quoteTokenScale;
 }
 
+export function toNormalizedQuoteTokenAmount(
+  rawAmount: bigint,
+  quoteTokenScale: bigint,
+): bigint {
+  if (rawAmount === 0n) return 0n;
+  if (quoteTokenScale <= 1n) return rawAmount;
+  return rawAmount * quoteTokenScale;
+}
+
 export function calculateReserveTakeAjnaCost(
   quoteAmount: bigint,
   auctionPrice: bigint,

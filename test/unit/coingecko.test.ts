@@ -11,6 +11,7 @@ describe("coingecko", () => {
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
+    vi.useRealTimers();
     vi.restoreAllMocks();
   });
 
@@ -48,6 +49,21 @@ describe("coingecko", () => {
     expect(price).toBe(0.003); // cached
   });
 
+  it("returns fresh cached price without re-fetching", async () => {
+    const tokenId = "fresh-cache-token";
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ [tokenId]: { usd: 0.003 } }),
+    });
+
+    const client = createCoingeckoClient("test-key");
+    await expect(client.getPrice(tokenId)).resolves.toBe(0.003);
+    await expect(client.getPrice(tokenId)).resolves.toBe(0.003);
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
   it("returns null when no cached price and API fails", async () => {
     mockFetch.mockResolvedValueOnce({
       ok: false,
@@ -62,24 +78,29 @@ describe("coingecko", () => {
   });
 
   it("returns null on price deviation exceeding threshold", async () => {
+    const tokenId = "deviation-token";
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-31T00:00:00.000Z"));
+
     // First call sets baseline
     mockFetch.mockResolvedValueOnce({
       ok: true,
       status: 200,
-      json: async () => ({ "ajna-protocol": { usd: 0.003 } }),
+      json: async () => ({ [tokenId]: { usd: 0.003 } }),
     });
 
     const client = createCoingeckoClient("test-key");
-    await client.getPrice("ajna-protocol");
+    await client.getPrice(tokenId);
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 1);
 
     // Second call has huge deviation (>20%)
     mockFetch.mockResolvedValueOnce({
       ok: true,
       status: 200,
-      json: async () => ({ "ajna-protocol": { usd: 0.01 } }),
+      json: async () => ({ [tokenId]: { usd: 0.01 } }),
     });
 
-    const price = await client.getPrice("ajna-protocol");
+    const price = await client.getPrice(tokenId);
     expect(price).toBeNull();
   });
 

@@ -5,6 +5,8 @@
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
+    "preanalytics:executions": "npm run build",
+    "analytics:executions": "node scripts/analyze-executions.mjs",
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",

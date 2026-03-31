@@ -11,7 +11,7 @@ Current status: funded strategy supports live execution. Mainnet uses a single-t
 1. **Discovers pools** by scanning the Ajna PoolFactory for all deployed pools with whitelisted quote tokens (WETH, USDC, DAI)
 2. **Monitors auctions** by polling each pool's reserve state via multicall
 3. **Kicks auctions** when reserves are available and the 120-hour cooldown has elapsed (checks for unsettled liquidations first)
-4. **Evaluates profitability** by comparing the Dutch auction price against market prices from Coingecko
+4. **Evaluates profitability** by comparing the Dutch auction price against configured market-price feeds
 5. **Executes trades** via `takeReserves()` when the price meets your configured target, with MEV protection
 
 ## Quick Start
@@ -22,7 +22,10 @@ Current status: funded strategy supports live execution. Mainnet uses a single-t
 - Foundry + `svm install 0.8.27` if you want to run the Solidity executor tests
 - An Ethereum wallet with AJNA (Mainnet) or bwAJNA (Base) tokens
 - RPC endpoints for Mainnet and/or Base
-- A [Coingecko Pro API](https://www.coingecko.com/en/api/pricing) key
+- Price API credentials for your chosen provider:
+  `COINGECKO_API_KEY` for `pricing.provider = "coingecko"` or `"dual"`
+  `ALCHEMY_API_KEY` for `pricing.provider = "alchemy"` or `"dual"`
+  `RPC_PROVIDER=alchemy` + `RPC_API_KEY` can be reused for Alchemy pricing automatically
 
 ### Setup
 
@@ -47,7 +50,8 @@ PRIVATE_KEY_FILE=./secrets/trading.key
 # KEYSTORE_PATH=./secrets/trading.keystore.json
 # KEYSTORE_PASSWORD_FILE=./secrets/trading.keystore.password
 
-COINGECKO_API_KEY=your_api_key
+COINGECKO_API_KEY=your_coingecko_api_key
+ALCHEMY_API_KEY=your_alchemy_price_api_key
 RPC_PROVIDER=alchemy
 RPC_API_KEY=your_alchemy_key
 
@@ -63,6 +67,9 @@ FLASHBOTS_AUTH_KEY_FILE=./secrets/flashbots-auth.key
       "enabled": true,
       "rpcUrl": "https://base-mainnet.g.alchemy.com/v2/your_key"
     }
+  },
+  "pricing": {
+    "provider": "coingecko"
   },
   "strategy": "funded",
   "funded": {
@@ -101,6 +108,9 @@ npm start
 
 # Lint
 npm run lint
+
+# Analyze execution payouts from JSON logs
+npm run analytics:executions -- ./keeper.log
 
 # Solidity executor tests
 npm run test:contracts
@@ -186,6 +196,7 @@ Flash-arb borrows AJNA or bwAJNA from a configured Uniswap V3 pool, calls `takeR
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `dryRun` | `true` | Log opportunities without executing. **Start here.** |
+| `pricing.provider` | `coingecko` | Price source: `coingecko`, `alchemy`, or strict `dual` agreement mode |
 | `funded.targetExitPriceUsd` | `0.10` | Minimum USD value of quote tokens received per AJNA spent |
 | `funded.autoApprove` | `false` | Auto-approve AJNA spending for pools |
 | `flashArb.maxSlippagePercent` | `1` | Slippage tolerance applied to quoted AJNA output before execution |
@@ -207,6 +218,7 @@ Flash-arb borrows AJNA or bwAJNA from a configured Uniswap V3 pool, calls `takeR
 
 - **Dry run by default.** The bot will not execute any transactions until you set `dryRun: false`.
 - **Use a dedicated hot wallet.** Never use your main wallet. Fund it with only the AJNA you're willing to trade.
+- **`dual` pricing is strict by design.** The keeper pauses execution if CoinGecko and Alchemy disagree beyond the configured divergence threshold or if either feed is unavailable.
 - **Prefer file or keystore secret inputs.** `PRIVATE_KEY_FILE` or `KEYSTORE_PATH` + `KEYSTORE_PASSWORD_FILE` keeps raw trading keys out of your shell environment.
 - **Mainnet live mode uses single-tx Flashbots bundles.** The keeper prepares, signs, simulates, and submits a raw bundle, then retries across up to 3 target blocks.
 - **Persist the Flashbots auth key.** `FLASHBOTS_AUTH_KEY_FILE` keeps a stable relay identity across restarts instead of generating a fresh one every boot.
@@ -216,6 +228,21 @@ Flash-arb borrows AJNA or bwAJNA from a configured Uniswap V3 pool, calls `takeR
 - **Gas ceiling.** The bot skips execution during gas spikes.
 - **Health check.** HTTP endpoint at `/health` (default port 8080) for monitoring.
 - **Pool discovery is cached locally.** Auto-discovered pool lists are persisted under `.cache/pool-discovery` to make restarts and periodic rediscovery cheaper.
+
+## Analytics
+
+Keeper logs are structured JSON lines. `npm run analytics:executions -- <log-file...>` reads those logs and summarizes execution payouts by strategy, chain, submission mode, price source, and pool.
+
+Successful live executions now include both:
+
+- estimated P&L from the pre-trade strategy decision
+- realized P&L from post-receipt wallet balance deltas plus gas spent
+
+If you pipe logs from Docker or systemd, send them through the script directly:
+
+```bash
+docker compose -f docker/docker-compose.yml logs keeper | npm run analytics:executions --
+```
 
 ## Architecture
 

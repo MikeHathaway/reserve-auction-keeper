@@ -12,6 +12,10 @@ import {
   calculateReserveTakeAjnaCost,
   normalizeReserveTakeAmount,
 } from "../auction/math.js";
+import {
+  captureExecutionSnapshot,
+  finalizeExecutionSettlement,
+} from "../execution/settlement.js";
 import { logger } from "../utils/logger.js";
 import type { DexQuoter } from "../pricing/uniswap-v3.js";
 
@@ -39,6 +43,8 @@ interface FlashArbStrategyConfig {
   minLiquidityUsd: number;
   minProfitUsd: number;
   dryRun: boolean;
+  ajnaToken: Address;
+  nativeTokenPriceUsd: number;
   dexQuoter?: DexQuoter;
   executorAddress?: Address;
   route?: FlashArbRouteConfig;
@@ -354,12 +360,36 @@ export function createFlashArbStrategy(
         };
       }
 
+      const beforeSettlement = await captureExecutionSnapshot(
+        publicClient,
+        walletAddress,
+        config.ajnaToken,
+        ctx.poolState.quoteToken,
+      );
+
       const submission = await submitter.submit({
         to: candidate.executorAddress,
         abi: FLASH_ARB_EXECUTOR_ABI,
         functionName: "executeFlashArb",
         args,
         account: walletAddress,
+      });
+
+      if (!submission.txHash) {
+        throw new Error(
+          `Execution submission via ${submitter.name} did not return a transaction hash.`,
+        );
+      }
+
+      const realized = await finalizeExecutionSettlement(beforeSettlement, {
+        publicClient,
+        txHash: submission.txHash,
+        walletAddress,
+        ajnaToken: config.ajnaToken,
+        quoteToken: ctx.poolState.quoteToken,
+        quoteTokenScale: ctx.poolState.quoteTokenScale,
+        prices: ctx.prices,
+        nativeTokenPriceUsd: config.nativeTokenPriceUsd,
       });
 
       return {
@@ -372,6 +402,7 @@ export function createFlashArbStrategy(
         amountQuoteReceived: candidate.quoteAmount,
         ajnaCost: candidate.repayAmount,
         profitUsd: candidate.estimatedProfitUsd,
+        realized,
         chain: ctx.chainName,
       };
     },

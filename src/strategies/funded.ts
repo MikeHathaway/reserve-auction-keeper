@@ -12,6 +12,10 @@ import {
   calculateReserveTakeAjnaCost,
   normalizeReserveTakeAmount,
 } from "../auction/math.js";
+import {
+  captureExecutionSnapshot,
+  finalizeExecutionSettlement,
+} from "../execution/settlement.js";
 import { logger } from "../utils/logger.js";
 
 interface FundedStrategyConfig {
@@ -20,6 +24,7 @@ interface FundedStrategyConfig {
   autoApprove: boolean;
   profitMarginPercent: number;
   dryRun: boolean;
+  nativeTokenPriceUsd: number;
 }
 
 interface FundedExecutionPlan {
@@ -210,10 +215,14 @@ export function createFundedStrategy(
       );
     }
 
-    await publicClient.waitForTransactionReceipt({ hash: submission.txHash });
+    const receipt = await publicClient.waitForTransactionReceipt({ hash: submission.txHash });
+    if (receipt.status !== "success") {
+      throw new Error(`Approval transaction ${submission.txHash} reverted on-chain.`);
+    }
     logger.info("AJNA approval confirmed", {
       pool,
       txHash: submission.txHash,
+      blockNumber: receipt.blockNumber.toString(),
       submissionMode: submission.mode,
       bundleHash: submission.bundleHash,
       targetBlock: submission.targetBlock?.toString(),
@@ -309,6 +318,13 @@ export function createFundedStrategy(
         };
       }
 
+      const beforeSettlement = await captureExecutionSnapshot(
+        publicClient,
+        walletAddress,
+        ajnaToken,
+        poolState.quoteToken,
+      );
+
       // Real execution via MEV-protected submission
       const submission = await submitter.submit({
         to: poolState.pool,
@@ -329,6 +345,23 @@ export function createFundedStrategy(
         ajnaCost: formatEther(plan.ajnaCost),
       });
 
+      if (!submission.txHash) {
+        throw new Error(
+          `Execution submission via ${submitter.name} did not return a transaction hash.`,
+        );
+      }
+
+      const realized = await finalizeExecutionSettlement(beforeSettlement, {
+        publicClient,
+        txHash: submission.txHash,
+        walletAddress,
+        ajnaToken,
+        quoteToken: poolState.quoteToken,
+        quoteTokenScale: poolState.quoteTokenScale,
+        prices: ctx.prices,
+        nativeTokenPriceUsd: config.nativeTokenPriceUsd,
+      });
+
       return {
         submissionMode: submission.mode,
         txHash: submission.txHash,
@@ -339,6 +372,7 @@ export function createFundedStrategy(
         amountQuoteReceived: plan.amount,
         ajnaCost: plan.ajnaCost,
         profitUsd: plan.profitUsd,
+        realized,
         chain: ctx.chainName,
       };
     },

@@ -1,6 +1,7 @@
 import type { Address, Hex } from "viem";
 import type { PoolReserveState } from "../auction/discovery.js";
 import type { PriceData } from "../pricing/oracle.js";
+import type { RealizedExecutionSettlement } from "../execution/settlement.js";
 
 export interface AuctionContext {
   poolState: PoolReserveState;
@@ -19,6 +20,7 @@ export interface TxResult {
   amountQuoteReceived: bigint;
   ajnaCost: bigint;
   profitUsd: number;
+  realized?: RealizedExecutionSettlement;
   chain: string;
 }
 

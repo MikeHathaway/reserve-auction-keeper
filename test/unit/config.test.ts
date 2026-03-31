@@ -76,6 +76,7 @@ describe("config", () => {
   beforeEach(() => {
     process.env.PRIVATE_KEY = DEFAULT_PRIVATE_KEY;
     process.env.COINGECKO_API_KEY = "test-api-key";
+    process.env.ALCHEMY_API_KEY = "test-alchemy-price-key";
   });
 
   afterEach(() => {
@@ -87,6 +88,7 @@ describe("config", () => {
     delete process.env.KEYSTORE_PASSWORD_FILE;
     delete process.env.FLASHBOTS_AUTH_KEY;
     delete process.env.FLASHBOTS_AUTH_KEY_FILE;
+    delete process.env.ALCHEMY_API_KEY;
     delete process.env.COINGECKO_API_KEY;
     delete process.env.RPC_PROVIDER;
     delete process.env.RPC_API_KEY;
@@ -108,6 +110,7 @@ describe("config", () => {
     expect(config.strategy).toBe("funded");
     expect(config.dryRun).toBe(true);
     expect(config.funded.targetExitPriceUsd).toBe(0.1);
+    expect(config.pricing.provider).toBe("coingecko");
   });
 
   it("defaults dryRun to true", () => {
@@ -146,6 +149,57 @@ describe("config", () => {
     });
 
     expect(() => loadConfig(CONFIG_FILE)).toThrow("COINGECKO_API_KEY is required");
+  });
+
+  it("does not require COINGECKO_API_KEY when pricing provider is alchemy", () => {
+    delete process.env.COINGECKO_API_KEY;
+    writeConfig({
+      chains: {
+        base: { enabled: true, rpcUrl: "https://base-rpc.example.com" },
+      },
+      pricing: {
+        provider: "alchemy",
+      },
+      funded: { targetExitPriceUsd: 0.1 },
+    });
+
+    const config = loadConfig(CONFIG_FILE);
+    expect(config.pricing.provider).toBe("alchemy");
+    expect(config.secrets.alchemyApiKey).toBe("test-alchemy-price-key");
+  });
+
+  it("reuses RPC_API_KEY for Alchemy pricing when RPC_PROVIDER=alchemy", () => {
+    delete process.env.ALCHEMY_API_KEY;
+    delete process.env.COINGECKO_API_KEY;
+    process.env.RPC_PROVIDER = "alchemy";
+    process.env.RPC_API_KEY = "shared-alchemy-key";
+    writeConfig({
+      chains: {
+        base: { enabled: true },
+      },
+      pricing: {
+        provider: "alchemy",
+      },
+      funded: { targetExitPriceUsd: 0.1 },
+    });
+
+    const config = loadConfig(CONFIG_FILE);
+    expect(config.secrets.alchemyApiKey).toBe("shared-alchemy-key");
+  });
+
+  it("throws on missing ALCHEMY_API_KEY when pricing provider needs it", () => {
+    delete process.env.ALCHEMY_API_KEY;
+    writeConfig({
+      chains: {
+        base: { enabled: true, rpcUrl: "https://base-rpc.example.com" },
+      },
+      pricing: {
+        provider: "alchemy",
+      },
+      funded: { targetExitPriceUsd: 0.1 },
+    });
+
+    expect(() => loadConfig(CONFIG_FILE)).toThrow("ALCHEMY_API_KEY is required");
   });
 
   it("throws when no chains enabled", () => {

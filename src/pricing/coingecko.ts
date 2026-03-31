@@ -17,7 +17,16 @@ export interface CoingeckoClient {
 export function createCoingeckoClient(apiKey: string): CoingeckoClient {
   const baseUrl = "https://pro-api.coingecko.com/api/v3";
 
+  function getCachedEntry(tokenId: string): CachedPrice | undefined {
+    return cache.get(tokenId);
+  }
+
   async function getPrice(tokenId: string): Promise<number | null> {
+    const cached = getCachedEntry(tokenId);
+    if (cached && Date.now() - cached.fetchedAt <= STALE_THRESHOLD_MS) {
+      return cached.price;
+    }
+
     try {
       const response = await fetch(
         `${baseUrl}/simple/price?ids=${tokenId}&vs_currencies=usd`,
@@ -51,7 +60,6 @@ export function createCoingeckoClient(apiKey: string): CoingeckoClient {
       }
 
       // Deviation check against last known price
-      const cached = cache.get(tokenId);
       if (cached) {
         const deviation = Math.abs(price - cached.price) / cached.price;
         if (deviation > MAX_DEVIATION_PERCENT / 100) {
@@ -77,13 +85,13 @@ export function createCoingeckoClient(apiKey: string): CoingeckoClient {
   }
 
   function getCachedPrice(tokenId: string): number | null {
-    const cached = cache.get(tokenId);
+    const cached = getCachedEntry(tokenId);
     if (!cached) return null;
     return cached.price;
   }
 
   function isPriceStale(tokenId: string): boolean {
-    const cached = cache.get(tokenId);
+    const cached = getCachedEntry(tokenId);
     if (!cached) return true;
     return Date.now() - cached.fetchedAt > STALE_THRESHOLD_MS;
   }

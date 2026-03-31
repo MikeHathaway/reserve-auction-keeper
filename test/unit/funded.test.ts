@@ -67,6 +67,7 @@ describe("funded strategy", () => {
         autoApprove: false,
         profitMarginPercent: 5,
         dryRun: true,
+        nativeTokenPriceUsd: BASE_CONFIG.nativeTokenPriceUsd,
       },
     );
 
@@ -92,6 +93,7 @@ describe("funded strategy", () => {
         autoApprove: false,
         profitMarginPercent: 5,
         dryRun: true,
+        nativeTokenPriceUsd: BASE_CONFIG.nativeTokenPriceUsd,
       },
     );
 
@@ -119,6 +121,7 @@ describe("funded strategy", () => {
         autoApprove: false,
         profitMarginPercent: 5,
         dryRun: true,
+        nativeTokenPriceUsd: BASE_CONFIG.nativeTokenPriceUsd,
       },
     );
 
@@ -146,6 +149,7 @@ describe("funded strategy", () => {
         autoApprove: true,
         profitMarginPercent: 5,
         dryRun: false,
+        nativeTokenPriceUsd: BASE_CONFIG.nativeTokenPriceUsd,
       },
     );
 
@@ -175,6 +179,7 @@ describe("funded strategy", () => {
         autoApprove: false,
         profitMarginPercent: 5,
         dryRun: true,
+        nativeTokenPriceUsd: BASE_CONFIG.nativeTokenPriceUsd,
       },
     );
 
@@ -213,6 +218,7 @@ describe("funded strategy", () => {
         autoApprove: false,
         profitMarginPercent: 0,
         dryRun: true,
+        nativeTokenPriceUsd: BASE_CONFIG.nativeTokenPriceUsd,
       },
     );
 
@@ -250,6 +256,7 @@ describe("funded strategy", () => {
         autoApprove: false,
         profitMarginPercent: 0,
         dryRun: true,
+        nativeTokenPriceUsd: BASE_CONFIG.nativeTokenPriceUsd,
       },
     );
 
@@ -291,6 +298,7 @@ describe("funded strategy", () => {
         autoApprove: false,
         profitMarginPercent: 0,
         dryRun: true,
+        nativeTokenPriceUsd: BASE_CONFIG.nativeTokenPriceUsd,
       },
     );
 
@@ -323,6 +331,7 @@ describe("funded strategy", () => {
         autoApprove: false,
         profitMarginPercent: 5,
         dryRun: true,
+        nativeTokenPriceUsd: BASE_CONFIG.nativeTokenPriceUsd,
       },
     );
 
@@ -337,8 +346,20 @@ describe("funded strategy", () => {
       chain: BASE_CONFIG.chain,
       readContract: vi.fn()
         .mockResolvedValueOnce(parseEther("100"))
-        .mockResolvedValueOnce(0n),
-      waitForTransactionReceipt: vi.fn().mockResolvedValue({}),
+        .mockResolvedValueOnce(0n)
+        .mockResolvedValueOnce(parseEther("100"))
+        .mockResolvedValueOnce(0n)
+        .mockResolvedValueOnce(parseEther("50"))
+        .mockResolvedValueOnce(50_000_000n),
+      getBalance: vi.fn()
+        .mockResolvedValueOnce(parseEther("1"))
+        .mockResolvedValueOnce(parseEther("0.9999")),
+      waitForTransactionReceipt: vi.fn().mockResolvedValue({
+        status: "success",
+        blockNumber: 123n,
+        gasUsed: 50_000n,
+        effectiveGasPrice: 2_000_000_000n,
+      }),
     };
     const walletClient = {
       account: { address: WALLET_ADDRESS },
@@ -366,6 +387,7 @@ describe("funded strategy", () => {
         autoApprove: true,
         profitMarginPercent: 5,
         dryRun: false,
+        nativeTokenPriceUsd: BASE_CONFIG.nativeTokenPriceUsd,
       },
     );
 
@@ -393,6 +415,13 @@ describe("funded strategy", () => {
       }),
     );
     expect(result.txHash).toBe("0x" + "bb".repeat(32));
+    expect(result.realized).toMatchObject({
+      blockNumber: 123n,
+      quoteTokenDelta: parseEther("50"),
+      quoteTokenDeltaRaw: 50_000_000n,
+      ajnaDelta: -parseEther("50"),
+    });
+    expect(result.realized?.profitUsd).toBeCloseTo(39.8, 6);
   });
 
   it("refuses to auto-approve during dry runs", async () => {
@@ -418,6 +447,7 @@ describe("funded strategy", () => {
         autoApprove: true,
         profitMarginPercent: 5,
         dryRun: true,
+        nativeTokenPriceUsd: BASE_CONFIG.nativeTokenPriceUsd,
       },
     );
 
@@ -447,6 +477,7 @@ describe("funded strategy", () => {
         autoApprove: false,
         profitMarginPercent: 5,
         dryRun: true,
+        nativeTokenPriceUsd: BASE_CONFIG.nativeTokenPriceUsd,
       },
     );
 

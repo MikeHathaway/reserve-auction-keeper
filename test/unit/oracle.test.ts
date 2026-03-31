@@ -1,7 +1,85 @@
 import { describe, it, expect } from "vitest";
-import { checkPriceDivergence } from "../../src/pricing/oracle.js";
+import { MAINNET_CONFIG } from "../../src/chains/index.js";
+import { checkPriceDivergence, createPriceOracle } from "../../src/pricing/oracle.js";
 
 describe("oracle", () => {
+  describe("createPriceOracle", () => {
+    it("returns alchemy prices when configured", async () => {
+      const oracle = createPriceOracle(
+        {
+          provider: "alchemy",
+          alchemy: {
+            getPrices: async () =>
+              new Map([
+                [MAINNET_CONFIG.ajnaToken, 0.003],
+                [MAINNET_CONFIG.quoteTokens.USDC, 1],
+              ]),
+            isPriceStale: () => false,
+          },
+        },
+        MAINNET_CONFIG,
+      );
+
+      await expect(oracle.getPrices("USDC")).resolves.toEqual({
+        ajnaPriceUsd: 0.003,
+        quoteTokenPriceUsd: 1,
+        source: "alchemy",
+        isStale: false,
+      });
+    });
+
+    it("returns conservative dual prices when feeds agree", async () => {
+      const oracle = createPriceOracle(
+        {
+          provider: "dual",
+          coingecko: {
+            getPrice: async (tokenId: string) => tokenId === "ajna-protocol" ? 0.003 : 1.01,
+            isPriceStale: () => false,
+          },
+          alchemy: {
+            getPrices: async () =>
+              new Map([
+                [MAINNET_CONFIG.ajnaToken, 0.0031],
+                [MAINNET_CONFIG.quoteTokens.USDC, 1],
+              ]),
+            isPriceStale: () => false,
+          },
+        },
+        MAINNET_CONFIG,
+      );
+
+      await expect(oracle.getPrices("USDC")).resolves.toEqual({
+        ajnaPriceUsd: 0.0031,
+        quoteTokenPriceUsd: 1,
+        source: "dual",
+        isStale: false,
+      });
+    });
+
+    it("returns null when dual feeds diverge beyond threshold", async () => {
+      const oracle = createPriceOracle(
+        {
+          provider: "dual",
+          coingecko: {
+            getPrice: async (tokenId: string) => tokenId === "ajna-protocol" ? 0.003 : 1,
+            isPriceStale: () => false,
+          },
+          alchemy: {
+            getPrices: async () =>
+              new Map([
+                [MAINNET_CONFIG.ajnaToken, 0.004],
+                [MAINNET_CONFIG.quoteTokens.USDC, 1],
+              ]),
+            isPriceStale: () => false,
+          },
+        },
+        MAINNET_CONFIG,
+      );
+
+      await expect(oracle.getPrices("USDC")).resolves.toBeNull();
+    });
+  });
+
   describe("checkPriceDivergence", () => {
     it("returns false for prices within threshold", () => {
       expect(checkPriceDivergence(100, 103, "test")).toBe(false);

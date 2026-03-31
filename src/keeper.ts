@@ -11,6 +11,7 @@ import type { AppConfig, ResolvedChainConfig } from "./config.js";
 import { discoverPools, getPoolReserveStates, canKickReserveAuction } from "./auction/discovery.js";
 import { getAuctionPrices } from "./auction/auction-price.js";
 import { createCoingeckoClient } from "./pricing/coingecko.js";
+import { createAlchemyPricesClient } from "./pricing/alchemy.js";
 import { createPriceOracle } from "./pricing/oracle.js";
 import { createUniswapV3DexQuoter } from "./pricing/uniswap-v3.js";
 import { createFundedStrategy } from "./strategies/funded.js";
@@ -66,6 +67,8 @@ function createStrategy(
       maxSlippagePercent: config.flashArb.maxSlippagePercent,
       minLiquidityUsd: config.flashArb.minLiquidityUsd,
       minProfitUsd: config.flashArb.minProfitUsd,
+      ajnaToken: resolved.chainConfig.ajnaToken,
+      nativeTokenPriceUsd: resolved.chainConfig.nativeTokenPriceUsd,
       executorAddress: config.flashArb.executorAddress,
       dryRun: config.dryRun,
       route: route
@@ -90,14 +93,15 @@ function createStrategy(
     walletClient,
     resolved.chainConfig.ajnaToken,
     submitter,
-    {
-      targetExitPriceUsd: config.funded.targetExitPriceUsd,
-      maxTakeAmount: config.funded.maxTakeAmount,
-      autoApprove: config.funded.autoApprove,
-      profitMarginPercent: config.profitMarginPercent,
-      dryRun: config.dryRun,
-    },
-  );
+      {
+        targetExitPriceUsd: config.funded.targetExitPriceUsd,
+        maxTakeAmount: config.funded.maxTakeAmount,
+        autoApprove: config.funded.autoApprove,
+        profitMarginPercent: config.profitMarginPercent,
+        dryRun: config.dryRun,
+        nativeTokenPriceUsd: resolved.chainConfig.nativeTokenPriceUsd,
+      },
+    );
 }
 
 function createChainKeeper(
@@ -172,8 +176,20 @@ function createChainKeeper(
 async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<void> {
   const { chainConfig, publicClient, strategy } = keeper;
   const chainName = chainConfig.chainConfig.name;
-  const coingecko = createCoingeckoClient(config.secrets.coingeckoApiKey);
-  const oracle = createPriceOracle(coingecko, chainConfig.chainConfig);
+  const coingecko = config.secrets.coingeckoApiKey
+    ? createCoingeckoClient(config.secrets.coingeckoApiKey)
+    : undefined;
+  const alchemy = config.secrets.alchemyApiKey
+    ? createAlchemyPricesClient(config.secrets.alchemyApiKey)
+    : undefined;
+  const oracle = createPriceOracle(
+    {
+      provider: config.pricing.provider,
+      coingecko,
+      alchemy,
+    },
+    chainConfig.chainConfig,
+  );
 
   logger.info("Starting keeper loop", { chain: chainName });
 
@@ -302,16 +318,35 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
           logger.info("Execution successful", {
             chain: chainName,
             pool: result.pool,
+            strategy: strategy.name,
+            quoteTokenSymbol: poolState.quoteTokenSymbol,
+            priceSource: ctx.prices.source,
             submissionMode: result.submissionMode,
             txHash: result.txHash,
             bundleHash: result.bundleHash,
             targetBlock: result.targetBlock?.toString(),
+            privateSubmission: result.privateSubmission,
+            amountQuoteReceived: result.amountQuoteReceived.toString(),
+            ajnaCost: result.ajnaCost.toString(),
+            estimatedProfitUsd: result.profitUsd.toFixed(4),
             profitUsd: result.profitUsd.toFixed(4),
+            realizedProfitUsd: result.realized?.profitUsd.toFixed(4),
+            realizedQuoteDelta: result.realized?.quoteTokenDelta.toString(),
+            realizedQuoteDeltaRaw: result.realized?.quoteTokenDeltaRaw.toString(),
+            realizedAjnaDelta: result.realized?.ajnaDelta.toString(),
+            realizedNativeDelta: result.realized?.nativeDelta.toString(),
+            gasFeeNative: result.realized?.gasFeeNative.toString(),
+            gasUsed: result.realized?.gasUsed.toString(),
+            effectiveGasPrice: result.realized?.effectiveGasPrice.toString(),
+            receiptBlockNumber: result.realized?.blockNumber.toString(),
           });
         } catch (error) {
           logger.error("Execution failed", {
             chain: chainName,
             pool: poolState.pool,
+            strategy: strategy.name,
+            quoteTokenSymbol: poolState.quoteTokenSymbol,
+            priceSource: ctx.prices.source,
             error: error instanceof Error ? error.message : String(error),
           });
         }

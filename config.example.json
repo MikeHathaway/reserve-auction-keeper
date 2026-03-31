@@ -11,6 +11,9 @@
       "pools": []
     }
   },
+  "pricing": {
+    "provider": "coingecko"
+  },
   "strategy": "funded",
   "funded": {
     "targetExitPriceUsd": 0.10,

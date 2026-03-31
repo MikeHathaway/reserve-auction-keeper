@@ -60,7 +60,9 @@ function makeStrategy({
   const publicClient = {
     chain: BASE_CONFIG.chain,
     readContract: vi.fn().mockResolvedValue(3000n),
+    getBalance: vi.fn(),
     simulateContract: vi.fn().mockResolvedValue({}),
+    waitForTransactionReceipt: vi.fn(),
   };
   const walletClient = {
     account: { address: WALLET_ADDRESS },
@@ -84,6 +86,8 @@ function makeStrategy({
       maxSlippagePercent: 1,
       minLiquidityUsd,
       minProfitUsd,
+      ajnaToken: BASE_CONFIG.ajnaToken,
+      nativeTokenPriceUsd: BASE_CONFIG.nativeTokenPriceUsd,
       executorAddress: EXECUTOR_ADDRESS,
       dryRun,
       route: {
@@ -154,7 +158,22 @@ describe("flash-arb strategy", () => {
   });
 
   it("submits executor transactions through the mev submitter in live mode", async () => {
-    const { strategy, submitter } = makeStrategy({ dryRun: false });
+    const { strategy, submitter, publicClient } = makeStrategy({ dryRun: false });
+    vi.mocked(publicClient.getBalance)
+      .mockResolvedValueOnce(parseEther("1"))
+      .mockResolvedValueOnce(parseEther("0.99995"));
+    vi.mocked(publicClient.readContract)
+      .mockResolvedValueOnce(3000n)
+      .mockResolvedValueOnce(parseEther("5"))
+      .mockResolvedValueOnce(0n)
+      .mockResolvedValueOnce(parseEther("8"))
+      .mockResolvedValueOnce(0n);
+    vi.mocked(publicClient.waitForTransactionReceipt).mockResolvedValue({
+      status: "success",
+      blockNumber: 55n,
+      gasUsed: 40_000n,
+      effectiveGasPrice: 1_250_000_000n,
+    });
     const ctx = makeContext();
 
     const result = await strategy.execute(ctx);
@@ -168,6 +187,12 @@ describe("flash-arb strategy", () => {
     );
     expect(result.submissionMode).toBe("private-rpc");
     expect(result.privateSubmission).toBe(true);
+    expect(result.realized).toMatchObject({
+      blockNumber: 55n,
+      quoteTokenDelta: 0n,
+      ajnaDelta: parseEther("3"),
+    });
+    expect(result.realized?.profitUsd).toBeCloseTo(0.5, 6);
   });
 
   it("rounds quote amounts to token scale and rounds borrowed AJNA up", async () => {
