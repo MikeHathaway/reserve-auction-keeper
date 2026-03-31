@@ -7,6 +7,11 @@ services:
     volumes:
       - ../config.json:/app/config.json:ro
       - keeper-cache:/app/.cache/pool-discovery
+      # Optional secret mounts. Pair these with *_FILE or KEYSTORE_* paths in ../.env.
+      # - ../secrets/trading.key:/run/secrets/trading.key:ro
+      # - ../secrets/flashbots-auth.key:/run/secrets/flashbots-auth.key:ro
+      # - ../secrets/trading.keystore.json:/run/secrets/trading.keystore.json:ro
+      # - ../secrets/trading.keystore.password:/run/secrets/trading.keystore.password:ro
     ports:
       - "8080:8080"
     restart: unless-stopped
@@ -16,6 +21,11 @@ services:
     environment:
       CONFIG_PATH: /app/config.json
       LOG_LEVEL: info
+      # Example values to place in ../.env:
+      # PRIVATE_KEY_FILE=/run/secrets/trading.key
+      # FLASHBOTS_AUTH_KEY_FILE=/run/secrets/flashbots-auth.key
+      # KEYSTORE_PATH=/run/secrets/trading.keystore.json
+      # KEYSTORE_PASSWORD_FILE=/run/secrets/trading.keystore.password
 
 volumes:
   keeper-cache:

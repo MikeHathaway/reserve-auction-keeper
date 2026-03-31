@@ -2,6 +2,7 @@ import { z } from "zod";
 import { readFileSync } from "node:fs";
 import { isAddress, type Address, type Hex } from "viem";
 import { CHAIN_CONFIGS, buildRpcUrl, type ChainConfig, type RpcProvider } from "./chains/index.js";
+import { loadOptionalHexSecret, resolvePrivateKeyFromEnv } from "./utils/secrets.js";
 
 const addressSchema = z.string().refine(isAddress, "Invalid Ethereum address");
 const hexSchema = z.string().regex(/^0x[0-9a-fA-F]*$/, "Invalid hex string");
@@ -120,10 +121,6 @@ export interface AppConfig {
 }
 
 function loadEnvSecrets(): EnvSecrets {
-  const privateKey = process.env.PRIVATE_KEY;
-  if (!privateKey) throw new Error("PRIVATE_KEY is required in .env");
-  if (!privateKey.startsWith("0x")) throw new Error("PRIVATE_KEY must start with 0x");
-
   const coingeckoApiKey = process.env.COINGECKO_API_KEY;
   if (!coingeckoApiKey) throw new Error("COINGECKO_API_KEY is required in .env");
 
@@ -133,11 +130,15 @@ function loadEnvSecrets(): EnvSecrets {
   const rpcApiKey = process.env.RPC_API_KEY;
 
   return {
-    privateKey: privateKey as Hex,
+    privateKey: resolvePrivateKeyFromEnv(process.env),
     coingeckoApiKey,
     rpcProvider,
     rpcApiKey,
-    flashbotsAuthKey: process.env.FLASHBOTS_AUTH_KEY as Hex | undefined,
+    flashbotsAuthKey: loadOptionalHexSecret(
+      process.env,
+      "FLASHBOTS_AUTH_KEY",
+      "FLASHBOTS_AUTH_KEY_FILE",
+    ),
   };
 }
 

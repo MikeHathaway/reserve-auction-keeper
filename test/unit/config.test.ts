@@ -1,27 +1,86 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { loadConfig } from "../../src/config.js";
-import { writeFileSync, unlinkSync, mkdirSync, existsSync } from "node:fs";
+import { createCipheriv, scryptSync } from "node:crypto";
+import { writeFileSync, mkdirSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { keccak256 } from "viem";
 
 const TMP_DIR = join(process.cwd(), "test", "tmp");
 const CONFIG_FILE = join(TMP_DIR, "test-config.json");
+const DEFAULT_PRIVATE_KEY = "0x" + "ab".repeat(32);
+const DEFAULT_FLASHBOTS_AUTH_KEY = "0x" + "cd".repeat(32);
+const KEYSTORE_PASSWORD = "correct horse battery staple";
 
 function writeConfig(config: object) {
   if (!existsSync(TMP_DIR)) mkdirSync(TMP_DIR, { recursive: true });
   writeFileSync(CONFIG_FILE, JSON.stringify(config));
 }
 
+function writeSecretFile(filename: string, contents: string): string {
+  if (!existsSync(TMP_DIR)) mkdirSync(TMP_DIR, { recursive: true });
+  const filePath = join(TMP_DIR, filename);
+  writeFileSync(filePath, contents);
+  return filePath;
+}
+
+function buildKeystore(privateKey: string, password: string): string {
+  const salt = Buffer.from("11".repeat(32), "hex");
+  const iv = Buffer.from("22".repeat(16), "hex");
+  const derivedKey = scryptSync(password, salt, 32, {
+    N: 1024,
+    r: 8,
+    p: 1,
+  });
+
+  const cipher = createCipheriv(
+    "aes-128-ctr",
+    derivedKey.subarray(0, 16),
+    iv,
+  );
+  const ciphertext = Buffer.concat([
+    cipher.update(Buffer.from(privateKey.slice(2), "hex")),
+    cipher.final(),
+  ]);
+  const mac = keccak256(
+    `0x${Buffer.concat([derivedKey.subarray(16, 32), ciphertext]).toString("hex")}`,
+  ).slice(2);
+
+  return JSON.stringify({
+    version: 3,
+    crypto: {
+      cipher: "aes-128-ctr",
+      cipherparams: {
+        iv: iv.toString("hex"),
+      },
+      ciphertext: ciphertext.toString("hex"),
+      kdf: "scrypt",
+      kdfparams: {
+        dklen: 32,
+        salt: salt.toString("hex"),
+        n: 1024,
+        r: 8,
+        p: 1,
+      },
+      mac,
+    },
+  });
+}
+
 describe("config", () => {
   beforeEach(() => {
-    process.env.PRIVATE_KEY = "0x" + "ab".repeat(32);
+    process.env.PRIVATE_KEY = DEFAULT_PRIVATE_KEY;
     process.env.COINGECKO_API_KEY = "test-api-key";
   });
 
   afterEach(() => {
-    try {
-      unlinkSync(CONFIG_FILE);
-    } catch {}
+    rmSync(TMP_DIR, { recursive: true, force: true });
     delete process.env.PRIVATE_KEY;
+    delete process.env.PRIVATE_KEY_FILE;
+    delete process.env.KEYSTORE_PATH;
+    delete process.env.KEYSTORE_PASSWORD;
+    delete process.env.KEYSTORE_PASSWORD_FILE;
+    delete process.env.FLASHBOTS_AUTH_KEY;
+    delete process.env.FLASHBOTS_AUTH_KEY_FILE;
     delete process.env.COINGECKO_API_KEY;
     delete process.env.RPC_PROVIDER;
     delete process.env.RPC_API_KEY;
@@ -57,7 +116,7 @@ describe("config", () => {
     expect(config.dryRun).toBe(true);
   });
 
-  it("throws on missing PRIVATE_KEY", () => {
+  it("throws on missing trading key input", () => {
     delete process.env.PRIVATE_KEY;
     writeConfig({
       chains: {
@@ -66,7 +125,9 @@ describe("config", () => {
       funded: { targetExitPriceUsd: 0.1 },
     });
 
-    expect(() => loadConfig(CONFIG_FILE)).toThrow("PRIVATE_KEY is required");
+    expect(() => loadConfig(CONFIG_FILE)).toThrow(
+      "One of PRIVATE_KEY, PRIVATE_KEY_FILE, or KEYSTORE_PATH is required",
+    );
   });
 
   it("throws on missing COINGECKO_API_KEY", () => {
@@ -159,6 +220,93 @@ describe("config", () => {
 
     const config = loadConfig(CONFIG_FILE);
     expect(config.chains[0].pools).toHaveLength(1);
+  });
+
+  it("loads PRIVATE_KEY_FILE when configured", () => {
+    delete process.env.PRIVATE_KEY;
+    process.env.PRIVATE_KEY_FILE = writeSecretFile("trading.key", `${DEFAULT_PRIVATE_KEY}\n`);
+    writeConfig({
+      chains: {
+        base: { enabled: true, rpcUrl: "https://base-rpc.example.com" },
+      },
+      funded: { targetExitPriceUsd: 0.1 },
+    });
+
+    const config = loadConfig(CONFIG_FILE);
+    expect(config.secrets.privateKey).toBe(DEFAULT_PRIVATE_KEY);
+  });
+
+  it("loads FLASHBOTS_AUTH_KEY_FILE when configured", () => {
+    process.env.FLASHBOTS_AUTH_KEY_FILE = writeSecretFile(
+      "flashbots-auth.key",
+      DEFAULT_FLASHBOTS_AUTH_KEY,
+    );
+    writeConfig({
+      chains: {
+        mainnet: { enabled: true, rpcUrl: "https://mainnet-rpc.example.com" },
+      },
+      funded: { targetExitPriceUsd: 0.1 },
+    });
+
+    const config = loadConfig(CONFIG_FILE);
+    expect(config.secrets.flashbotsAuthKey).toBe(DEFAULT_FLASHBOTS_AUTH_KEY);
+  });
+
+  it("loads KEYSTORE_PATH with KEYSTORE_PASSWORD_FILE", () => {
+    delete process.env.PRIVATE_KEY;
+    process.env.KEYSTORE_PATH = writeSecretFile(
+      "trading.keystore.json",
+      buildKeystore(DEFAULT_PRIVATE_KEY, KEYSTORE_PASSWORD),
+    );
+    process.env.KEYSTORE_PASSWORD_FILE = writeSecretFile(
+      "trading.keystore.password",
+      `${KEYSTORE_PASSWORD}\n`,
+    );
+    writeConfig({
+      chains: {
+        base: { enabled: true, rpcUrl: "https://base-rpc.example.com" },
+      },
+      funded: { targetExitPriceUsd: 0.1 },
+    });
+
+    const config = loadConfig(CONFIG_FILE);
+    expect(config.secrets.privateKey).toBe(DEFAULT_PRIVATE_KEY);
+  });
+
+  it("throws on invalid keystore password", () => {
+    delete process.env.PRIVATE_KEY;
+    process.env.KEYSTORE_PATH = writeSecretFile(
+      "trading.keystore.json",
+      buildKeystore(DEFAULT_PRIVATE_KEY, KEYSTORE_PASSWORD),
+    );
+    process.env.KEYSTORE_PASSWORD_FILE = writeSecretFile(
+      "trading.keystore.password",
+      "wrong-password\n",
+    );
+    writeConfig({
+      chains: {
+        base: { enabled: true, rpcUrl: "https://base-rpc.example.com" },
+      },
+      funded: { targetExitPriceUsd: 0.1 },
+    });
+
+    expect(() => loadConfig(CONFIG_FILE)).toThrow(
+      "Invalid keystore password or MAC mismatch",
+    );
+  });
+
+  it("throws when multiple trading key sources are configured", () => {
+    process.env.PRIVATE_KEY_FILE = writeSecretFile("trading.key", DEFAULT_PRIVATE_KEY);
+    writeConfig({
+      chains: {
+        base: { enabled: true, rpcUrl: "https://base-rpc.example.com" },
+      },
+      funded: { targetExitPriceUsd: 0.1 },
+    });
+
+    expect(() => loadConfig(CONFIG_FILE)).toThrow(
+      "Configure exactly one of PRIVATE_KEY, PRIVATE_KEY_FILE, or KEYSTORE_PATH",
+    );
   });
 
   it("loads flash-arb strategy configuration", () => {

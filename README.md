@@ -41,9 +41,18 @@ cp config.example.json config.json
 
 **`.env`** — secrets (never commit this file):
 ```
-PRIVATE_KEY=0xyour_private_key_here
+# Choose exactly one trading key source:
+PRIVATE_KEY_FILE=./secrets/trading.key
+# or:
+# KEYSTORE_PATH=./secrets/trading.keystore.json
+# KEYSTORE_PASSWORD_FILE=./secrets/trading.keystore.password
+
 COINGECKO_API_KEY=your_api_key
-BASE_RPC_URL=https://base-mainnet.g.alchemy.com/v2/your_key
+RPC_PROVIDER=alchemy
+RPC_API_KEY=your_alchemy_key
+
+# Recommended for stable mainnet Flashbots relay identity:
+FLASHBOTS_AUTH_KEY_FILE=./secrets/flashbots-auth.key
 ```
 
 **`config.json`** — bot settings:
@@ -106,9 +115,22 @@ docker compose -f docker/docker-compose.yml up -d --build
 This runs the keeper as a long-lived service with:
 
 - `config.json` mounted read-only at `/app/config.json`
-- secrets loaded from your local `.env` via Compose `env_file`
+- secret paths loaded from your local `.env` via Compose `env_file`
 - a named Docker volume mounted at `/app/.cache/pool-discovery` so pool auto-discovery stays warm across restarts
 - the existing `/health` endpoint exposed on port `8080`
+
+Recommended Docker secret pattern:
+
+1. Put secret files on the host, for example under `./secrets/`.
+2. In `.env`, point the bot at the in-container file paths:
+   ```dotenv
+   PRIVATE_KEY_FILE=/run/secrets/trading.key
+   FLASHBOTS_AUTH_KEY_FILE=/run/secrets/flashbots-auth.key
+   # or:
+   # KEYSTORE_PATH=/run/secrets/trading.keystore.json
+   # KEYSTORE_PASSWORD_FILE=/run/secrets/trading.keystore.password
+   ```
+3. Uncomment the matching bind mounts in [`docker/docker-compose.yml`](docker/docker-compose.yml).
 
 ### systemd
 
@@ -182,7 +204,9 @@ Flash-arb borrows AJNA or bwAJNA from a configured Uniswap V3 pool, calls `takeR
 
 - **Dry run by default.** The bot will not execute any transactions until you set `dryRun: false`.
 - **Use a dedicated hot wallet.** Never use your main wallet. Fund it with only the AJNA you're willing to trade.
+- **Prefer file or keystore secret inputs.** `PRIVATE_KEY_FILE` or `KEYSTORE_PATH` + `KEYSTORE_PASSWORD_FILE` keeps raw trading keys out of your shell environment.
 - **Mainnet live mode uses single-tx Flashbots bundles.** The keeper prepares, signs, simulates, and submits a raw bundle, then retries across up to 3 target blocks.
+- **Persist the Flashbots auth key.** `FLASHBOTS_AUTH_KEY_FILE` keeps a stable relay identity across restarts instead of generating a fresh one every boot.
 - **Base and other `private-rpc` chains fail closed without a private RPC URL.** Live submission is disabled instead of silently degrading to public mempool.
 - **Flash-arb requires a deployed executor contract.** The keeper will refuse live flash-arb mode if the chain route or executor address is missing.
 - **Flash-arb callback verification is factory-hardened.** The executor checks the callback sender against the configured Uniswap V3 factory and pool init code hash before repaying any flash loan.

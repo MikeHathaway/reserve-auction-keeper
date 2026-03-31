@@ -11,6 +11,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import type { MevSubmitter, SubmitRequest, SubmissionResult } from "./mev-submitter.js";
 import { logger } from "../utils/logger.js";
 import { getErrorMessage, isTransientRpcError, retryAsync } from "../utils/retry.js";
+import { generateEphemeralPrivateKey } from "../utils/secrets.js";
 
 const FLASHBOTS_RELAY_URL = "https://relay.flashbots.net";
 const MAX_BLOCK_RETRIES = 3;
@@ -57,12 +58,15 @@ export function createFlashbotsSubmitter(
   const maxBlockRetries = options.maxBlockRetries || MAX_BLOCK_RETRIES;
   const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   const sleep = options.sleep || defaultSleep;
+  const flashbotsAuthKey = authKey ?? generateEphemeralPrivateKey();
 
-  const authAccount = authKey
-    ? privateKeyToAccount(authKey)
-    : privateKeyToAccount(
-        `0x${Array.from({ length: 64 }, () => Math.floor(Math.random() * 16).toString(16)).join("")}` as Hex,
-      );
+  if (!authKey) {
+    logger.warn(
+      "FLASHBOTS_AUTH_KEY not configured; generated an ephemeral relay identity for this process",
+    );
+  }
+
+  const authAccount = privateKeyToAccount(flashbotsAuthKey);
 
   async function signFlashbotsPayload(body: string): Promise<string> {
     const hash = keccak256(toHex(body));
