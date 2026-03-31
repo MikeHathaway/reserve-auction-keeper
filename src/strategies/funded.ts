@@ -4,7 +4,6 @@ import {
   type Address,
   formatEther,
   parseEther,
-  getContract,
 } from "viem";
 import type { ExecutionStrategy, AuctionContext, TxResult } from "./interface.js";
 import type { MevSubmitter } from "../execution/mev-submitter.js";
@@ -265,7 +264,7 @@ export function createFundedStrategy(
     },
 
     async execute(ctx: AuctionContext): Promise<TxResult> {
-      const { poolState, auctionPrice, prices } = ctx;
+      const { poolState } = ctx;
       const plan = await getExecutionPlan(ctx);
       if (!plan) {
         throw new Error("Calculated take amount is 0");

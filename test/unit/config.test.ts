@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { loadConfig } from "../../src/config.js";
 import { createCipheriv, scryptSync } from "node:crypto";
 import { writeFileSync, mkdirSync, existsSync, rmSync } from "node:fs";

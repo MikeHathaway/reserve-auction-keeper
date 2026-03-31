@@ -99,6 +99,9 @@ npm run dev
 # Production
 npm start
 
+# Lint
+npm run lint
+
 # Solidity executor tests
 npm run test:contracts
 

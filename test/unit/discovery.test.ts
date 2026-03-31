@@ -2,6 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as ViemModule from "viem";
 import { parseEther } from "viem";
 import {
   discoverPools,
@@ -12,7 +13,7 @@ import { BASE_CONFIG } from "../../src/chains/index.js";
 const mockGetNumberOfDeployedPools = vi.fn();
 
 vi.mock("viem", async () => {
-  const actual = await vi.importActual<typeof import("viem")>("viem");
+  const actual = await vi.importActual<typeof ViemModule>("viem");
 
   return {
     ...actual,

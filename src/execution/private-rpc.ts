@@ -1,7 +1,6 @@
 import {
   type PublicClient,
   type WalletClient,
-  type Hex,
   createPublicClient,
   http,
   encodeFunctionData,
