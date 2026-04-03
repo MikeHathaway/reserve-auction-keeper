@@ -1,9 +1,16 @@
-import type { Address, Hex, PublicClient } from "viem";
+import { formatEther, type Address, type Hex, type PublicClient } from "viem";
 import type { MevSubmitter, SubmissionResult } from "../execution/mev-submitter.js";
 import { POOL_ABI } from "../contracts/abis/index.js";
 
 export interface KickAuctionResult extends SubmissionResult {
   receiptBlockNumber: bigint;
+}
+
+export function estimateKickClaimableValueUsd(
+  claimableReserves: bigint,
+  quoteTokenPriceUsd: number,
+): number {
+  return Number(formatEther(claimableReserves)) * quoteTokenPriceUsd;
 }
 
 export async function kickReserveAuction(

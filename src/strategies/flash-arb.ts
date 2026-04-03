@@ -5,7 +5,12 @@ import {
   type PublicClient,
   type WalletClient,
 } from "viem";
-import type { AuctionContext, ExecutionStrategy, TxResult } from "./interface.js";
+import type {
+  AuctionContext,
+  ExecutionStrategy,
+  KickContext,
+  TxResult,
+} from "./interface.js";
 import type { MevSubmitter } from "../execution/mev-submitter.js";
 import { FLASH_ARB_EXECUTOR_ABI } from "../contracts/abis/index.js";
 import {
@@ -64,6 +69,8 @@ interface FlashArbCandidate {
   slippagePercent: number;
 }
 
+type RouteContext = Pick<AuctionContext, "poolState" | "chainName"> | KickContext;
+
 export function createFlashArbStrategy(
   publicClient: PublicClient,
   walletClient: WalletClient,
@@ -75,7 +82,7 @@ export function createFlashArbStrategy(
   const flashPoolFeeCache = new Map<Address, bigint>();
   let lastCandidate: { key: string; candidate: FlashArbCandidate | null } | null = null;
 
-  function warnOnce(message: string, key: string, ctx: AuctionContext) {
+  function warnOnce(message: string, key: string, ctx: RouteContext) {
     if (warnedKeys.has(key)) return;
     warnedKeys.add(key);
     logger.warn(message, {
@@ -133,7 +140,7 @@ export function createFlashArbStrategy(
     return feePpm;
   }
 
-  function resolveRoute(ctx: AuctionContext): {
+  function resolveRoute(ctx: RouteContext): {
     executorAddress: Address;
     flashPool: Address;
     swapPath: Hex;
@@ -410,6 +417,33 @@ export function createFlashArbStrategy(
     async estimateProfit(ctx: AuctionContext): Promise<number> {
       const candidate = await evaluateCandidate(ctx);
       return candidate?.estimatedProfitUsd ?? 0;
+    },
+
+    async estimateKickProfit(ctx: KickContext): Promise<number> {
+      const route = resolveRoute(ctx);
+      if (!route || !config.dexQuoter) return 0;
+
+      const quoteAmount = normalizeReserveTakeAmount(
+        ctx.poolState.claimableReserves,
+        ctx.poolState.quoteTokenScale,
+      );
+      if (quoteAmount === 0n) return 0;
+
+      const liquidityUsd =
+        Number(formatEther(quoteAmount)) * ctx.prices.quoteTokenPriceUsd;
+      if (liquidityUsd < config.minLiquidityUsd) return 0;
+
+      const quote = await config.dexQuoter.quoteQuoteToAjna(
+        ctx.poolState.quoteTokenSymbol,
+        quoteAmount,
+        ctx.poolState.quoteTokenScale,
+        ctx.prices,
+      );
+      if (!quote) return 0;
+      if (quote.slippagePercent > config.maxSlippagePercent) return 0;
+
+      const minAjnaOut = applySlippageFloor(quote.amountOut);
+      return Number(formatEther(minAjnaOut)) * ctx.prices.ajnaPriceUsd;
     },
   };
 }

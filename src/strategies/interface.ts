@@ -10,6 +10,12 @@ export interface AuctionContext {
   chainName: string;
 }
 
+export interface KickContext {
+  poolState: PoolReserveState;
+  prices: PriceData;
+  chainName: string;
+}
+
 export interface TxResult {
   submissionMode: "dry-run" | "private-rpc" | "flashbots";
   txHash?: Hex;
@@ -35,4 +41,10 @@ export interface ExecutionStrategy {
 
   /** Estimate the total profit in USD for this auction opportunity. */
   estimateProfit(ctx: AuctionContext): Promise<number>;
+
+  /**
+   * Estimate the strategy's best-case future profit in USD if this pool is kicked now,
+   * excluding the kick transaction gas itself.
+   */
+  estimateKickProfit(ctx: KickContext): Promise<number>;
 }

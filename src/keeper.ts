@@ -9,7 +9,10 @@ import {
 import { privateKeyToAccount } from "viem/accounts";
 import type { AppConfig, ResolvedChainConfig } from "./config.js";
 import { discoverPools, getPoolReserveStates, canKickReserveAuction } from "./auction/discovery.js";
-import { kickReserveAuction } from "./auction/kick.js";
+import {
+  estimateKickClaimableValueUsd,
+  kickReserveAuction,
+} from "./auction/kick.js";
 import { getAuctionPrices } from "./auction/auction-price.js";
 import { createCoingeckoClient } from "./pricing/coingecko.js";
 import { createAlchemyPricesClient } from "./pricing/alchemy.js";
@@ -22,9 +25,10 @@ import { createFlashbotsSubmitter } from "./execution/flashbots.js";
 import { createPrivateRpcSubmitter } from "./execution/private-rpc.js";
 import type { MevSubmitter } from "./execution/mev-submitter.js";
 import {
-  checkGasPrice,
-  isNearProfitableAfterGas,
-  isProfitableAfterGas,
+  evaluateGasCost,
+  isNearProfitableAfterCosts,
+  isProfitableAfterCosts,
+  sumEstimatedCostsUsd,
 } from "./execution/gas.js";
 import { logger } from "./utils/logger.js";
 
@@ -207,6 +211,8 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
 
   let rediscoveryCounter = 0;
   const REDISCOVERY_INTERVAL = 50; // Re-discover pools every 50 cycles
+  const EXECUTION_GAS_UNITS = 200_000n;
+  const KICK_RESERVE_AUCTION_GAS_UNITS = 120_000n;
 
   while (!shutdownRequested) {
     try {
@@ -240,13 +246,26 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
         activePools,
       );
       const priceCache = new Map<string, ReturnType<typeof oracle.getPrices>>();
-      const gasCheckPromise = activeAuctions.length > 0
-        ? checkGasPrice(
-            publicClient,
-            config.gasPriceCeilingGwei,
-            200_000n,
-            chainConfig.chainConfig.nativeTokenPriceUsd,
-          )
+      const gasPricePromise = activeAuctions.length > 0 || kickable.length > 0
+        ? publicClient.getGasPrice()
+        : null;
+      const executionGasCheckPromise = gasPricePromise
+        ? gasPricePromise.then((gasPrice) =>
+            evaluateGasCost(
+              gasPrice,
+              config.gasPriceCeilingGwei,
+              EXECUTION_GAS_UNITS,
+              chainConfig.chainConfig.nativeTokenPriceUsd,
+            ))
+        : null;
+      const kickGasCheckPromise = gasPricePromise
+        ? gasPricePromise.then((gasPrice) =>
+            evaluateGasCost(
+              gasPrice,
+              config.gasPriceCeilingGwei,
+              KICK_RESERVE_AUCTION_GAS_UNITS,
+              chainConfig.chainConfig.nativeTokenPriceUsd,
+            ))
         : null;
 
       // 4. Evaluate and execute on each active auction
@@ -281,12 +300,12 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
         };
 
         const profit = await strategy.estimateProfit(ctx);
-        const gasCheck = await gasCheckPromise!;
+        const executionGasCheck = await executionGasCheckPromise!;
 
         if (
-          isNearProfitableAfterGas(
+          isNearProfitableAfterCosts(
             profit,
-            gasCheck.estimatedCostUsd,
+            executionGasCheck.estimatedCostUsd,
             config.profitMarginPercent,
             config.polling.profitabilityThreshold,
           )
@@ -294,18 +313,18 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
           anyNearProfitable = true;
         }
 
-        if (gasCheck.isAboveCeiling) continue;
+        if (executionGasCheck.isAboveCeiling) continue;
 
-        if (!isProfitableAfterGas(
+        if (!isProfitableAfterCosts(
           profit,
-          gasCheck.estimatedCostUsd,
+          executionGasCheck.estimatedCostUsd,
           config.profitMarginPercent,
         )) {
           logger.debug("Not yet profitable", {
             chain: chainName,
             pool: poolState.pool,
             estimatedProfitUsd: profit.toFixed(4),
-            gasCostUsd: gasCheck.estimatedCostUsd.toFixed(4),
+            gasCostUsd: executionGasCheck.estimatedCostUsd.toFixed(4),
           });
           continue;
         }
@@ -355,6 +374,62 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
       // 5. Kick reserve auctions if eligible
       for (const poolState of kickable) {
         if (shutdownRequested) break;
+
+        let pricesPromise = priceCache.get(poolState.quoteTokenSymbol);
+        if (!pricesPromise) {
+          pricesPromise = oracle.getPrices(poolState.quoteTokenSymbol);
+          priceCache.set(poolState.quoteTokenSymbol, pricesPromise);
+        }
+
+        const prices = await pricesPromise;
+        if (!prices) continue;
+
+        if (prices.isStale) {
+          logger.warn("Skipping reserve-auction kick due to stale prices", {
+            chain: chainName,
+            pool: poolState.pool,
+            quoteTokenSymbol: poolState.quoteTokenSymbol,
+          });
+          continue;
+        }
+
+        const kickGasCheck = await kickGasCheckPromise!;
+        const executionGasCheck = await executionGasCheckPromise!;
+        if (kickGasCheck.isAboveCeiling) continue;
+        if (executionGasCheck.isAboveCeiling) continue;
+
+        const claimableValueUsd = estimateKickClaimableValueUsd(
+          poolState.claimableReserves,
+          prices.quoteTokenPriceUsd,
+        );
+        const kickCtx = {
+          poolState,
+          prices,
+          chainName,
+        };
+        const kickProfitUpperBoundUsd = await strategy.estimateKickProfit(kickCtx);
+        const totalExpectedCostUsd = sumEstimatedCostsUsd(
+          kickGasCheck.estimatedCostUsd,
+          executionGasCheck.estimatedCostUsd,
+        );
+        if (
+          !isProfitableAfterCosts(
+            kickProfitUpperBoundUsd,
+            totalExpectedCostUsd,
+            config.profitMarginPercent,
+          )
+        ) {
+          logger.debug("Skipping uneconomic reserve-auction kick", {
+            chain: chainName,
+            pool: poolState.pool,
+            quoteTokenSymbol: poolState.quoteTokenSymbol,
+            claimableReservesUsd: claimableValueUsd.toFixed(6),
+            kickGasCostUsd: kickGasCheck.estimatedCostUsd.toFixed(6),
+            futureExecutionGasCostUsd: executionGasCheck.estimatedCostUsd.toFixed(6),
+            estimatedKickProfitUpperBoundUsd: kickProfitUpperBoundUsd.toFixed(6),
+          });
+          continue;
+        }
 
         const canKick = await canKickReserveAuction(publicClient, poolState.pool);
         if (!canKick) {

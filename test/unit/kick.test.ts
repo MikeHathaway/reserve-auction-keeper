@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { kickReserveAuction } from "../../src/auction/kick.js";
+import {
+  estimateKickClaimableValueUsd,
+  kickReserveAuction,
+} from "../../src/auction/kick.js";
+import { parseEther } from "viem";
 import type { MevSubmitter } from "../../src/execution/mev-submitter.js";
 
 const POOL = "0x1111111111111111111111111111111111111111";
@@ -19,6 +23,10 @@ function makeSubmitter(): MevSubmitter {
 }
 
 describe("kick reserve auction", () => {
+  it("estimates claimable reserve value in usd", () => {
+    expect(estimateKickClaimableValueUsd(parseEther("0.00249"), 1)).toBeCloseTo(0.00249, 8);
+  });
+
   it("submits through the configured submitter and waits for a successful receipt", async () => {
     const publicClient = {
       waitForTransactionReceipt: vi.fn().mockResolvedValue({

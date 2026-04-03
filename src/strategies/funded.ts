@@ -5,7 +5,12 @@ import {
   formatEther,
   parseEther,
 } from "viem";
-import type { ExecutionStrategy, AuctionContext, TxResult } from "./interface.js";
+import type {
+  ExecutionStrategy,
+  AuctionContext,
+  KickContext,
+  TxResult,
+} from "./interface.js";
 import type { MevSubmitter } from "../execution/mev-submitter.js";
 import { POOL_ABI } from "../contracts/abis/index.js";
 import {
@@ -380,6 +385,20 @@ export function createFundedStrategy(
     async estimateProfit(ctx: AuctionContext): Promise<number> {
       const plan = await getExecutionPlan(ctx);
       return plan?.profitUsd ?? 0;
+    },
+
+    async estimateKickProfit(ctx: KickContext): Promise<number> {
+      const balance = await getAjnaBalance();
+      if (balance === 0n) return 0;
+
+      let amount = ctx.poolState.claimableReserves;
+      if (config.maxTakeAmount && amount > config.maxTakeAmount) {
+        amount = config.maxTakeAmount;
+      }
+      amount = normalizeReserveTakeAmount(amount, ctx.poolState.quoteTokenScale);
+      if (amount === 0n) return 0;
+
+      return Number(formatEther(amount)) * ctx.prices.quoteTokenPriceUsd;
     },
   };
 }

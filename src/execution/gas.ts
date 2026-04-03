@@ -9,10 +9,35 @@ export interface GasCheck {
 }
 
 export function getRequiredProfitUsd(
-  gasCostUsd: number,
+  estimatedCostUsd: number,
   profitMarginPercent: number,
 ): number {
-  return gasCostUsd * (1 + profitMarginPercent / 100);
+  return estimatedCostUsd * (1 + profitMarginPercent / 100);
+}
+
+export function sumEstimatedCostsUsd(...costs: number[]): number {
+  return costs.reduce((sum, cost) => sum + cost, 0);
+}
+
+export function evaluateGasCost(
+  gasPrice: bigint,
+  ceilingGwei: number,
+  estimatedGasUnits: bigint = 200_000n,
+  nativeTokenPriceUsd: number = 2000,
+): GasCheck {
+  const gasPriceGwei = Number(formatGwei(gasPrice));
+
+  const estimatedCostWei = gasPrice * estimatedGasUnits;
+  const estimatedCostEth = Number(estimatedCostWei) / 1e18;
+  const estimatedCostUsd = estimatedCostEth * nativeTokenPriceUsd;
+
+  const isAboveCeiling = gasPriceGwei > ceilingGwei;
+
+  return {
+    currentGasPriceGwei: gasPriceGwei,
+    isAboveCeiling,
+    estimatedCostUsd,
+  };
 }
 
 /**
@@ -25,47 +50,42 @@ export async function checkGasPrice(
   nativeTokenPriceUsd: number = 2000,
 ): Promise<GasCheck> {
   const gasPrice = await client.getGasPrice();
-  const gasPriceGwei = Number(formatGwei(gasPrice));
+  const result = evaluateGasCost(
+    gasPrice,
+    ceilingGwei,
+    estimatedGasUnits,
+    nativeTokenPriceUsd,
+  );
 
-  const estimatedCostWei = gasPrice * estimatedGasUnits;
-  const estimatedCostEth = Number(estimatedCostWei) / 1e18;
-  const estimatedCostUsd = estimatedCostEth * nativeTokenPriceUsd;
-
-  const isAboveCeiling = gasPriceGwei > ceilingGwei;
-
-  if (isAboveCeiling) {
+  if (result.isAboveCeiling) {
     logger.warn("Gas price above ceiling, skipping execution", {
-      currentGwei: gasPriceGwei.toFixed(1),
+      currentGwei: result.currentGasPriceGwei.toFixed(1),
       ceilingGwei,
-      estimatedCostUsd: estimatedCostUsd.toFixed(2),
+      estimatedCostUsd: result.estimatedCostUsd.toFixed(2),
     });
   }
 
-  return {
-    currentGasPriceGwei: gasPriceGwei,
-    isAboveCeiling,
-    estimatedCostUsd,
-  };
+  return result;
 }
 
 /**
- * Check if an auction opportunity is profitable after gas costs.
+ * Check if an opportunity is profitable after estimated costs.
  */
-export function isProfitableAfterGas(
+export function isProfitableAfterCosts(
   estimatedProfitUsd: number,
-  gasCostUsd: number,
+  estimatedCostUsd: number,
   profitMarginPercent: number,
 ): boolean {
-  return estimatedProfitUsd > getRequiredProfitUsd(gasCostUsd, profitMarginPercent);
+  return estimatedProfitUsd > getRequiredProfitUsd(estimatedCostUsd, profitMarginPercent);
 }
 
-export function isNearProfitableAfterGas(
+export function isNearProfitableAfterCosts(
   estimatedProfitUsd: number,
-  gasCostUsd: number,
+  estimatedCostUsd: number,
   profitMarginPercent: number,
   profitabilityThreshold: number,
 ): boolean {
-  const minProfit = getRequiredProfitUsd(gasCostUsd, profitMarginPercent);
+  const minProfit = getRequiredProfitUsd(estimatedCostUsd, profitMarginPercent);
 
   if (minProfit === 0) {
     return estimatedProfitUsd > 0;
@@ -74,3 +94,6 @@ export function isNearProfitableAfterGas(
   const thresholdFloor = Math.max(0, 1 - profitabilityThreshold);
   return estimatedProfitUsd >= minProfit * thresholdFloor;
 }
+
+export const isProfitableAfterGas = isProfitableAfterCosts;
+export const isNearProfitableAfterGas = isNearProfitableAfterCosts;

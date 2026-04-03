@@ -483,4 +483,68 @@ describe("funded strategy", () => {
 
     await expect(strategy.estimateProfit(makeContext())).resolves.toBe(30);
   });
+
+  it("estimateKickProfit returns zero when the wallet has no AJNA", async () => {
+    const publicClient = {
+      chain: BASE_CONFIG.chain,
+      readContract: vi.fn().mockResolvedValue(0n),
+    };
+    const walletClient = {
+      account: { address: WALLET_ADDRESS },
+    };
+
+    const strategy = createFundedStrategy(
+      publicClient as never,
+      walletClient as never,
+      BASE_CONFIG.ajnaToken,
+      makeSubmitter(),
+      {
+        targetExitPriceUsd: 0.1,
+        autoApprove: false,
+        profitMarginPercent: 5,
+        dryRun: true,
+        nativeTokenPriceUsd: BASE_CONFIG.nativeTokenPriceUsd,
+      },
+    );
+
+    await expect(strategy.estimateKickProfit({
+      poolState: makeContext().poolState,
+      prices: makeContext().prices,
+      chainName: "base",
+    })).resolves.toBe(0);
+  });
+
+  it("estimateKickProfit uses the future claimable value capped by maxTakeAmount", async () => {
+    const publicClient = {
+      chain: BASE_CONFIG.chain,
+      readContract: vi.fn().mockResolvedValue(parseEther("1")),
+    };
+    const walletClient = {
+      account: { address: WALLET_ADDRESS },
+    };
+
+    const strategy = createFundedStrategy(
+      publicClient as never,
+      walletClient as never,
+      BASE_CONFIG.ajnaToken,
+      makeSubmitter(),
+      {
+        targetExitPriceUsd: 0.1,
+        maxTakeAmount: parseEther("3"),
+        autoApprove: false,
+        profitMarginPercent: 5,
+        dryRun: true,
+        nativeTokenPriceUsd: BASE_CONFIG.nativeTokenPriceUsd,
+      },
+    );
+
+    await expect(strategy.estimateKickProfit({
+      poolState: {
+        ...makeContext().poolState,
+        claimableReserves: parseEther("10"),
+      },
+      prices: makeContext().prices,
+      chainName: "base",
+    })).resolves.toBe(3);
+  });
 });

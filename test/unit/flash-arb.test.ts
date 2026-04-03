@@ -229,4 +229,20 @@ describe("flash-arb strategy", () => {
     expect(result.amountQuoteReceived).toBe(100n);
     expect(result.ajnaCost).toBe(102n);
   });
+
+  it("estimateKickProfit uses the full claimable reserves and route quote as a best-case upper bound", async () => {
+    const { strategy, dexQuoter } = makeStrategy();
+
+    await expect(strategy.estimateKickProfit({
+      poolState: makeContext().poolState,
+      prices: makeContext().prices,
+      chainName: "base",
+    })).resolves.toBeCloseTo(11.88, 6);
+    expect(dexQuoter.quoteQuoteToAjna).toHaveBeenCalledWith(
+      "USDC",
+      parseEther("50"),
+      1_000_000_000_000n,
+      expect.any(Object),
+    );
+  });
 });
