@@ -9,6 +9,7 @@ import {
 import { privateKeyToAccount } from "viem/accounts";
 import type { AppConfig, ResolvedChainConfig } from "./config.js";
 import { discoverPools, getPoolReserveStates, canKickReserveAuction } from "./auction/discovery.js";
+import { kickReserveAuction } from "./auction/kick.js";
 import { getAuctionPrices } from "./auction/auction-price.js";
 import { createCoingeckoClient } from "./pricing/coingecko.js";
 import { createAlchemyPricesClient } from "./pricing/alchemy.js";
@@ -25,7 +26,6 @@ import {
   isNearProfitableAfterGas,
   isProfitableAfterGas,
 } from "./execution/gas.js";
-import { POOL_ABI } from "./contracts/abis/index.js";
 import { logger } from "./utils/logger.js";
 
 let shutdownRequested = false;
@@ -373,18 +373,21 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
 
         if (!config.dryRun) {
           try {
-            const hash = await keeper.walletClient.writeContract({
-              address: poolState.pool,
-              abi: POOL_ABI,
-              functionName: "kickReserveAuction",
-              chain: publicClient.chain,
-              account: keeper.walletClient.account!,
-            });
+            const submission = await kickReserveAuction(
+              publicClient,
+              keeper.submitter,
+              keeper.walletClient.account!.address,
+              poolState.pool,
+            );
 
             logger.info("Reserve auction kicked", {
               chain: chainName,
               pool: poolState.pool,
-              hash,
+              hash: submission.txHash,
+              submissionMode: submission.mode,
+              bundleHash: submission.bundleHash,
+              targetBlock: submission.targetBlock?.toString(),
+              receiptBlockNumber: submission.receiptBlockNumber.toString(),
             });
           } catch (error) {
             logger.error("Failed to kick reserve auction", {
