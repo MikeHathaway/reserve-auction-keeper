@@ -90,6 +90,7 @@ describe("config", () => {
     delete process.env.FLASHBOTS_AUTH_KEY_FILE;
     delete process.env.ALCHEMY_API_KEY;
     delete process.env.COINGECKO_API_KEY;
+    delete process.env.COINGECKO_API_PLAN;
     delete process.env.RPC_PROVIDER;
     delete process.env.RPC_API_KEY;
   });
@@ -166,6 +167,45 @@ describe("config", () => {
     const config = loadConfig(CONFIG_FILE);
     expect(config.pricing.provider).toBe("alchemy");
     expect(config.secrets.alchemyApiKey).toBe("test-alchemy-price-key");
+  });
+
+  it("defaults COINGECKO_API_PLAN to auto", () => {
+    writeConfig({
+      chains: {
+        base: { enabled: true, rpcUrl: "https://base-rpc.example.com" },
+      },
+      funded: { targetExitPriceUsd: 0.1 },
+    });
+
+    const config = loadConfig(CONFIG_FILE);
+    expect(config.secrets.coingeckoApiPlan).toBe("auto");
+  });
+
+  it("loads explicit COINGECKO_API_PLAN", () => {
+    process.env.COINGECKO_API_PLAN = "demo";
+    writeConfig({
+      chains: {
+        base: { enabled: true, rpcUrl: "https://base-rpc.example.com" },
+      },
+      funded: { targetExitPriceUsd: 0.1 },
+    });
+
+    const config = loadConfig(CONFIG_FILE);
+    expect(config.secrets.coingeckoApiPlan).toBe("demo");
+  });
+
+  it("rejects invalid COINGECKO_API_PLAN values", () => {
+    process.env.COINGECKO_API_PLAN = "invalid";
+    writeConfig({
+      chains: {
+        base: { enabled: true, rpcUrl: "https://base-rpc.example.com" },
+      },
+      funded: { targetExitPriceUsd: 0.1 },
+    });
+
+    expect(() => loadConfig(CONFIG_FILE)).toThrow(
+      "COINGECKO_API_PLAN must be one of: auto, demo, pro",
+    );
   });
 
   it("reuses RPC_API_KEY for Alchemy pricing when RPC_PROVIDER=alchemy", () => {

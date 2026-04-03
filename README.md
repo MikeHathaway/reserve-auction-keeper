@@ -24,6 +24,7 @@ Current status: funded strategy supports live execution. Mainnet uses a single-t
 - RPC endpoints for Mainnet and/or Base
 - Price API credentials for your chosen provider:
   `COINGECKO_API_KEY` for `pricing.provider = "coingecko"` or `"dual"`
+  `COINGECKO_API_PLAN=demo|pro|auto` optionally pins the CoinGecko host/header, default `auto`
   `ALCHEMY_API_KEY` for `pricing.provider = "alchemy"` or `"dual"`
   `RPC_PROVIDER=alchemy` + `RPC_API_KEY` can be reused for Alchemy pricing automatically
 
@@ -51,6 +52,8 @@ PRIVATE_KEY_FILE=./secrets/trading.key
 # KEYSTORE_PASSWORD_FILE=./secrets/trading.keystore.password
 
 COINGECKO_API_KEY=your_coingecko_api_key
+# Optional: auto-detect by default. Set demo for Demo keys to avoid a first-request fallback.
+# COINGECKO_API_PLAN=auto
 ALCHEMY_API_KEY=your_alchemy_price_api_key
 RPC_PROVIDER=alchemy
 RPC_API_KEY=your_alchemy_key
@@ -214,6 +217,7 @@ Flash-arb borrows AJNA or bwAJNA from a configured Uniswap V3 pool, calls `takeR
 |---------|---------|-------------|
 | `dryRun` | `true` | Log opportunities without executing. **Start here.** |
 | `pricing.provider` | `coingecko` | Price source: `coingecko`, `alchemy`, or strict `dual` agreement mode |
+| `COINGECKO_API_PLAN` | `auto` | CoinGecko auth mode: `demo`, `pro`, or `auto` host detection |
 | `chains.<chain>.quoteTokens.<symbol>.address` | unset | Adds or overrides a quote token whitelist entry for auto-discovery on that chain |
 | `chains.<chain>.quoteTokens.<symbol>.coingeckoId` | unset | Required for new tokens when `pricing.provider` is `coingecko` or `dual`; optional in `alchemy` mode |
 | `funded.targetExitPriceUsd` | `0.10` | Minimum USD value of quote tokens received per AJNA spent |
@@ -238,6 +242,7 @@ Flash-arb borrows AJNA or bwAJNA from a configured Uniswap V3 pool, calls `takeR
 - **Dry run by default.** The bot will not execute any transactions until you set `dryRun: false`.
 - **Use a dedicated hot wallet.** Never use your main wallet. Fund it with only the AJNA you're willing to trade.
 - **`dual` pricing is strict by design.** The keeper pauses execution if CoinGecko and Alchemy disagree beyond the configured divergence threshold or if either feed is unavailable.
+- **CoinGecko Demo and Pro keys are both supported.** `COINGECKO_API_PLAN=auto` will switch hosts if CoinGecko returns an auth host mismatch, and `demo`/`pro` lets you pin it up front.
 - **Custom quote tokens are config-driven and additive.** Add them under `chains.<chain>.quoteTokens` without changing source code. They merge with the built-in per-chain whitelist unless you explicitly override an existing symbol. In `coingecko` or `dual` mode, each new symbol also needs a `coingeckoId`.
 - **Prefer file or keystore secret inputs.** `PRIVATE_KEY_FILE` or `KEYSTORE_PATH` + `KEYSTORE_PASSWORD_FILE` keeps raw trading keys out of your shell environment.
 - **Mainnet live mode uses single-tx Flashbots bundles.** The keeper prepares, signs, simulates, and submits a raw bundle, then retries across up to 3 target blocks.
@@ -275,7 +280,7 @@ src/
     discovery.ts        — Pool auto-discovery via PoolFactory + reserve state
     auction-price.ts    — On-chain auction price from PoolInfoUtils
   pricing/
-    coingecko.ts        — Coingecko Pro API client with caching
+    coingecko.ts        — CoinGecko API client with caching and demo/pro host support
     oracle.ts           — Price oracle with cross-check support
   strategies/
     interface.ts        — ExecutionStrategy interface (pluggable)

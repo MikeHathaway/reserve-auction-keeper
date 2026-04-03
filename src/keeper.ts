@@ -181,7 +181,10 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
   const { chainConfig, publicClient, strategy } = keeper;
   const chainName = chainConfig.chainConfig.name;
   const coingecko = config.secrets.coingeckoApiKey
-    ? createCoingeckoClient(config.secrets.coingeckoApiKey)
+    ? createCoingeckoClient(
+      config.secrets.coingeckoApiKey,
+      config.secrets.coingeckoApiPlan,
+    )
     : undefined;
   const alchemy = config.secrets.alchemyApiKey
     ? createAlchemyPricesClient(config.secrets.alchemyApiKey)

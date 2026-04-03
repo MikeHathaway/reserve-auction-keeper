@@ -4,6 +4,7 @@ import { isAddress, type Address, type Hex } from "viem";
 import { CHAIN_CONFIGS, buildRpcUrl, type ChainConfig, type RpcProvider } from "./chains/index.js";
 import { loadOptionalHexSecret, resolvePrivateKeyFromEnv } from "./utils/secrets.js";
 import type { PriceProvider } from "./pricing/oracle.js";
+import type { CoingeckoApiPlan } from "./pricing/coingecko.js";
 
 const addressSchema = z.string().refine(isAddress, "Invalid Ethereum address");
 const hexSchema = z.string().regex(/^0x[0-9a-fA-F]*$/, "Invalid hex string");
@@ -83,6 +84,7 @@ export type ConfigFile = z.infer<typeof configFileSchema>;
 export interface EnvSecrets {
   privateKey: Hex;
   coingeckoApiKey?: string;
+  coingeckoApiPlan: CoingeckoApiPlan;
   alchemyApiKey?: string;
   rpcProvider?: RpcProvider;
   rpcApiKey?: string;
@@ -234,8 +236,13 @@ function loadEnvSecrets(priceProvider: PriceProvider): EnvSecrets {
   const rpcProvider = process.env.RPC_PROVIDER as RpcProvider | undefined;
   const rpcApiKey = process.env.RPC_API_KEY;
   const coingeckoApiKey = process.env.COINGECKO_API_KEY;
+  const coingeckoApiPlan = (process.env.COINGECKO_API_PLAN ?? "auto") as CoingeckoApiPlan;
   const alchemyApiKey = process.env.ALCHEMY_API_KEY ||
     (rpcProvider === "alchemy" ? rpcApiKey : undefined);
+
+  if (!["auto", "demo", "pro"].includes(coingeckoApiPlan)) {
+    throw new Error("COINGECKO_API_PLAN must be one of: auto, demo, pro");
+  }
 
   if ((priceProvider === "coingecko" || priceProvider === "dual") && !coingeckoApiKey) {
     throw new Error("COINGECKO_API_KEY is required for the selected pricing provider");
@@ -250,6 +257,7 @@ function loadEnvSecrets(priceProvider: PriceProvider): EnvSecrets {
   return {
     privateKey: resolvePrivateKeyFromEnv(process.env),
     coingeckoApiKey,
+    coingeckoApiPlan,
     alchemyApiKey,
     rpcProvider,
     rpcApiKey,

@@ -27,6 +27,56 @@ describe("coingecko", () => {
     expect(price).toBe(0.003);
   });
 
+  it("uses demo host and header when configured explicitly", async () => {
+    const tokenId = "demo-plan-token";
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ [tokenId]: { usd: 0.003 } }),
+    });
+
+    const client = createCoingeckoClient("test-key", "demo");
+    await expect(client.getPrice(tokenId)).resolves.toBe(0.003);
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(mockFetch.mock.calls[0]?.[0]).toContain("https://api.coingecko.com/api/v3");
+    expect(mockFetch.mock.calls[0]?.[1]?.headers).toMatchObject({
+      "x-cg-demo-api-key": "test-key",
+    });
+  });
+
+  it("auto-switches from pro to demo host on auth host mismatch", async () => {
+    const tokenId = "auto-plan-switch-token";
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 400,
+        json: async () => ({
+          error_code: 10011,
+          message: "This request must use the non-Pro API host with a Demo API key.",
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ [tokenId]: { usd: 0.003 } }),
+      });
+
+    const client = createCoingeckoClient("test-key", "auto");
+    await expect(client.getPrice(tokenId)).resolves.toBe(0.003);
+    await expect(client.getPrice(tokenId)).resolves.toBe(0.003);
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(mockFetch.mock.calls[0]?.[0]).toContain("https://pro-api.coingecko.com/api/v3");
+    expect(mockFetch.mock.calls[0]?.[1]?.headers).toMatchObject({
+      "x-cg-pro-api-key": "test-key",
+    });
+    expect(mockFetch.mock.calls[1]?.[0]).toContain("https://api.coingecko.com/api/v3");
+    expect(mockFetch.mock.calls[1]?.[1]?.headers).toMatchObject({
+      "x-cg-demo-api-key": "test-key",
+    });
+  });
+
   it("returns cached price on rate limit (429)", async () => {
     // First call succeeds
     mockFetch.mockResolvedValueOnce({
