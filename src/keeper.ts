@@ -245,7 +245,12 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
         chainConfig.chainConfig,
         activePools,
       );
-      const priceCache = new Map<string, ReturnType<typeof oracle.getPrices>>();
+      const quoteTokenSymbols = [...new Set(
+        [...activeAuctions, ...kickable].map((poolState) => poolState.quoteTokenSymbol),
+      )];
+      const priceCache = quoteTokenSymbols.length > 0
+        ? await oracle.getPricesForQuoteTokens(quoteTokenSymbols)
+        : new Map<string, Awaited<ReturnType<typeof oracle.getPrices>>>();
       const gasPricePromise = activeAuctions.length > 0 || kickable.length > 0
         ? publicClient.getGasPrice()
         : null;
@@ -275,13 +280,7 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
         const priceInfo = auctionPrices.get(poolState.pool);
         if (!priceInfo) continue;
 
-        let pricesPromise = priceCache.get(poolState.quoteTokenSymbol);
-        if (!pricesPromise) {
-          pricesPromise = oracle.getPrices(poolState.quoteTokenSymbol);
-          priceCache.set(poolState.quoteTokenSymbol, pricesPromise);
-        }
-
-        const prices = await pricesPromise;
+        const prices = priceCache.get(poolState.quoteTokenSymbol) ?? null;
         if (!prices) continue;
 
         if (prices.isStale) {
@@ -375,13 +374,7 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
       for (const poolState of kickable) {
         if (shutdownRequested) break;
 
-        let pricesPromise = priceCache.get(poolState.quoteTokenSymbol);
-        if (!pricesPromise) {
-          pricesPromise = oracle.getPrices(poolState.quoteTokenSymbol);
-          priceCache.set(poolState.quoteTokenSymbol, pricesPromise);
-        }
-
-        const prices = await pricesPromise;
+        const prices = priceCache.get(poolState.quoteTokenSymbol) ?? null;
         if (!prices) continue;
 
         if (prices.isStale) {

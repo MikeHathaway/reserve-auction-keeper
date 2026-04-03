@@ -7,6 +7,10 @@ import type { PriceProvider } from "./pricing/oracle.js";
 
 const addressSchema = z.string().refine(isAddress, "Invalid Ethereum address");
 const hexSchema = z.string().regex(/^0x[0-9a-fA-F]*$/, "Invalid hex string");
+const quoteTokenOverrideSchema = z.object({
+  address: addressSchema,
+  coingeckoId: z.string().min(1).optional(),
+});
 const flashArbRouteSchema = z.object({
   quoterAddress: addressSchema,
   executorAddress: addressSchema.optional(),
@@ -19,6 +23,7 @@ const chainConfigSchema = z.object({
   rpcUrl: z.string().url("RPC URL must be a valid URL").optional(),
   privateRpcUrl: z.string().url().optional(),
   pools: z.array(addressSchema).default([]),
+  quoteTokens: z.record(z.string().min(1), quoteTokenOverrideSchema).default({}),
 });
 
 const configFileSchema = z.object({
@@ -130,6 +135,99 @@ export interface AppConfig {
   secrets: EnvSecrets;
 }
 
+type ChainName = "mainnet" | "base" | "arbitrum" | "optimism" | "polygon";
+
+function normalizeSymbol(symbol: string): string {
+  return symbol.trim().toUpperCase();
+}
+
+function normalizeRecordKeys<T>(record: Record<string, T>): Record<string, T> {
+  return Object.fromEntries(
+    Object.entries(record).map(([key, value]) => [normalizeSymbol(key), value]),
+  );
+}
+
+function mergeChainConfig(
+  chainName: ChainName,
+  baseChainConfig: ChainConfig,
+  chainFileConfig: ConfigFile["chains"][ChainName],
+  priceProvider: PriceProvider,
+): ChainConfig {
+  if (!chainFileConfig) {
+    return baseChainConfig;
+  }
+
+  const mergedQuoteTokens = { ...baseChainConfig.quoteTokens };
+  const mergedCoingeckoIds = { ...baseChainConfig.coingeckoIds.quoteTokens };
+
+  for (const [rawSymbol, override] of Object.entries(chainFileConfig.quoteTokens)) {
+    const symbol = normalizeSymbol(rawSymbol);
+    mergedQuoteTokens[symbol] = override.address as Address;
+
+    if (override.coingeckoId) {
+      mergedCoingeckoIds[symbol] = override.coingeckoId;
+      continue;
+    }
+
+    if (!mergedCoingeckoIds[symbol] && (priceProvider === "coingecko" || priceProvider === "dual")) {
+      throw new Error(
+        `chains.${chainName}.quoteTokens.${rawSymbol}.coingeckoId is required for the selected pricing provider`,
+      );
+    }
+  }
+
+  return {
+    ...baseChainConfig,
+    quoteTokens: normalizeRecordKeys(mergedQuoteTokens),
+    coingeckoIds: {
+      ...baseChainConfig.coingeckoIds,
+      quoteTokens: normalizeRecordKeys(mergedCoingeckoIds),
+    },
+  };
+}
+
+function normalizeFlashArbRouteMaps(
+  routes: AppConfig["flashArb"]["routes"],
+): AppConfig["flashArb"]["routes"] {
+  return {
+    mainnet: routes.mainnet
+      ? {
+          ...routes.mainnet,
+          flashLoanPools: normalizeRecordKeys(routes.mainnet.flashLoanPools),
+          quoteToAjnaPaths: normalizeRecordKeys(routes.mainnet.quoteToAjnaPaths),
+        }
+      : undefined,
+    base: routes.base
+      ? {
+          ...routes.base,
+          flashLoanPools: normalizeRecordKeys(routes.base.flashLoanPools),
+          quoteToAjnaPaths: normalizeRecordKeys(routes.base.quoteToAjnaPaths),
+        }
+      : undefined,
+    arbitrum: routes.arbitrum
+      ? {
+          ...routes.arbitrum,
+          flashLoanPools: normalizeRecordKeys(routes.arbitrum.flashLoanPools),
+          quoteToAjnaPaths: normalizeRecordKeys(routes.arbitrum.quoteToAjnaPaths),
+        }
+      : undefined,
+    optimism: routes.optimism
+      ? {
+          ...routes.optimism,
+          flashLoanPools: normalizeRecordKeys(routes.optimism.flashLoanPools),
+          quoteToAjnaPaths: normalizeRecordKeys(routes.optimism.quoteToAjnaPaths),
+        }
+      : undefined,
+    polygon: routes.polygon
+      ? {
+          ...routes.polygon,
+          flashLoanPools: normalizeRecordKeys(routes.polygon.flashLoanPools),
+          quoteToAjnaPaths: normalizeRecordKeys(routes.polygon.quoteToAjnaPaths),
+        }
+      : undefined,
+  };
+}
+
 function loadEnvSecrets(priceProvider: PriceProvider): EnvSecrets {
   // RPC provider: set RPC_PROVIDER (alchemy|infura) + RPC_API_KEY
   // and URLs are auto-constructed for all chains.
@@ -171,11 +269,14 @@ export function loadConfig(configPath: string): AppConfig {
 
   const chains: ResolvedChainConfig[] = [];
 
-  for (const [name, chainFileConfig] of Object.entries(parsed.chains)) {
+  for (const [name, chainFileConfig] of Object.entries(parsed.chains) as Array<
+    [ChainName, ConfigFile["chains"][ChainName]]
+  >) {
     if (!chainFileConfig?.enabled) continue;
 
     const chainConfig = CHAIN_CONFIGS[name];
     if (!chainConfig) throw new Error(`Unknown chain: ${name}`);
+    const resolvedChainConfig = mergeChainConfig(name, chainConfig, chainFileConfig, pricing.provider);
 
     // RPC URL resolution priority:
     // 1. Explicit rpcUrl in config.json (per-chain override)
@@ -184,14 +285,14 @@ export function loadConfig(configPath: string): AppConfig {
     const rpcUrl: string =
       chainFileConfig.rpcUrl ||
       (secrets.rpcProvider && secrets.rpcApiKey
-        ? buildRpcUrl(chainConfig, secrets.rpcProvider, secrets.rpcApiKey)
+        ? buildRpcUrl(resolvedChainConfig, secrets.rpcProvider, secrets.rpcApiKey)
         : null) ||
-      chainConfig.defaultRpcUrl;
+      resolvedChainConfig.defaultRpcUrl;
 
     const privateRpcUrl = chainFileConfig.privateRpcUrl;
 
     chains.push({
-      chainConfig,
+      chainConfig: resolvedChainConfig,
       rpcUrl,
       privateRpcUrl,
       pools: (chainFileConfig.pools || []) as Address[],
@@ -229,7 +330,7 @@ export function loadConfig(configPath: string): AppConfig {
       minLiquidityUsd: flashArb.minLiquidityUsd,
       minProfitUsd: flashArb.minProfitUsd,
       executorAddress: flashArb.executorAddress as Address | undefined,
-      routes: {
+      routes: normalizeFlashArbRouteMaps({
         mainnet: flashArb.routes?.mainnet
           ? {
               quoterAddress: flashArb.routes.mainnet.quoterAddress as Address,
@@ -270,7 +371,7 @@ export function loadConfig(configPath: string): AppConfig {
               quoteToAjnaPaths: flashArb.routes.polygon.quoteToAjnaPaths as Record<string, Hex>,
             }
           : undefined,
-      },
+      }),
     },
     polling,
     dryRun: parsed.dryRun,

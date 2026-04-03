@@ -64,6 +64,27 @@ describe("coingecko", () => {
     expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 
+  it("batches multiple token ids into one request", async () => {
+    const ajnaTokenId = "batch-ajna-token";
+    const quoteTokenId = "batch-quote-token";
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        [ajnaTokenId]: { usd: 0.003 },
+        [quoteTokenId]: { usd: 1 },
+      }),
+    });
+
+    const client = createCoingeckoClient("test-key");
+    const prices = await client.getPrices([ajnaTokenId, quoteTokenId]);
+
+    expect(prices.get(ajnaTokenId)).toBe(0.003);
+    expect(prices.get(quoteTokenId)).toBe(1);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(mockFetch.mock.calls[0]?.[0]).toContain(`ids=${ajnaTokenId}%2C${quoteTokenId}`);
+  });
+
   it("returns null when no cached price and API fails", async () => {
     mockFetch.mockResolvedValueOnce({
       ok: false,

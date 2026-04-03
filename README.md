@@ -8,7 +8,7 @@ Current status: funded strategy supports live execution. Mainnet uses a single-t
 
 ## How It Works
 
-1. **Discovers pools** by scanning the Ajna PoolFactory for all deployed pools with whitelisted quote tokens (WETH, USDC, DAI)
+1. **Discovers pools** by scanning the Ajna PoolFactory for all deployed pools whose quote token matches the configured whitelist (built-in defaults plus any per-chain overrides in `config.json`)
 2. **Monitors auctions** by polling each pool's reserve state via multicall
 3. **Kicks auctions** when reserves are available and the 120-hour cooldown has elapsed (checks for unsettled liquidations first)
 4. **Evaluates profitability** by comparing the Dutch auction price against configured market-price feeds
@@ -65,7 +65,13 @@ FLASHBOTS_AUTH_KEY_FILE=./secrets/flashbots-auth.key
   "chains": {
     "base": {
       "enabled": true,
-      "rpcUrl": "https://base-mainnet.g.alchemy.com/v2/your_key"
+      "rpcUrl": "https://base-mainnet.g.alchemy.com/v2/your_key",
+      "quoteTokens": {
+        "ALT": {
+          "address": "0x0000000000000000000000000000000000000010",
+          "coingeckoId": "your-coingecko-token-id"
+        }
+      }
     }
   },
   "pricing": {
@@ -96,6 +102,8 @@ FLASHBOTS_AUTH_KEY_FILE=./secrets/flashbots-auth.key
   "dryRun": true
 }
 ```
+
+`chains.<chain>.quoteTokens` is additive by default. It merges with the chain's built-in quote-token whitelist and can override an existing symbol by reusing the same key.
 
 ### Run
 
@@ -206,6 +214,8 @@ Flash-arb borrows AJNA or bwAJNA from a configured Uniswap V3 pool, calls `takeR
 |---------|---------|-------------|
 | `dryRun` | `true` | Log opportunities without executing. **Start here.** |
 | `pricing.provider` | `coingecko` | Price source: `coingecko`, `alchemy`, or strict `dual` agreement mode |
+| `chains.<chain>.quoteTokens.<symbol>.address` | unset | Adds or overrides a quote token whitelist entry for auto-discovery on that chain |
+| `chains.<chain>.quoteTokens.<symbol>.coingeckoId` | unset | Required for new tokens when `pricing.provider` is `coingecko` or `dual`; optional in `alchemy` mode |
 | `funded.targetExitPriceUsd` | `0.10` | Minimum USD value of quote tokens received per AJNA spent |
 | `funded.autoApprove` | `false` | Auto-approve AJNA spending for pools |
 | `flashArb.maxSlippagePercent` | `1` | Slippage tolerance applied to quoted AJNA output before execution |
@@ -228,6 +238,7 @@ Flash-arb borrows AJNA or bwAJNA from a configured Uniswap V3 pool, calls `takeR
 - **Dry run by default.** The bot will not execute any transactions until you set `dryRun: false`.
 - **Use a dedicated hot wallet.** Never use your main wallet. Fund it with only the AJNA you're willing to trade.
 - **`dual` pricing is strict by design.** The keeper pauses execution if CoinGecko and Alchemy disagree beyond the configured divergence threshold or if either feed is unavailable.
+- **Custom quote tokens are config-driven and additive.** Add them under `chains.<chain>.quoteTokens` without changing source code. They merge with the built-in per-chain whitelist unless you explicitly override an existing symbol. In `coingecko` or `dual` mode, each new symbol also needs a `coingeckoId`.
 - **Prefer file or keystore secret inputs.** `PRIVATE_KEY_FILE` or `KEYSTORE_PATH` + `KEYSTORE_PASSWORD_FILE` keeps raw trading keys out of your shell environment.
 - **Mainnet live mode uses single-tx Flashbots bundles.** The keeper prepares, signs, simulates, and submits a raw bundle, then retries across up to 3 target blocks.
 - **Persist the Flashbots auth key.** `FLASHBOTS_AUTH_KEY_FILE` keeps a stable relay identity across restarts instead of generating a fresh one every boot.

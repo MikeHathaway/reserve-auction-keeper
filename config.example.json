@@ -3,6 +3,12 @@
     "base": {
       "enabled": true,
       "rpcUrl": "https://base-mainnet.g.alchemy.com/v2/your_key",
+      "quoteTokens": {
+        "ALT": {
+          "address": "0x0000000000000000000000000000000000000010",
+          "coingeckoId": "your-coingecko-token-id"
+        }
+      },
       "pools": []
     },
     "mainnet": {

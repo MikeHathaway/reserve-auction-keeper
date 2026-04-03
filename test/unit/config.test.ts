@@ -282,6 +282,81 @@ describe("config", () => {
     expect(config.chains[0].pools).toHaveLength(1);
   });
 
+  it("merges custom quote tokens into the chain config", () => {
+    writeConfig({
+      chains: {
+        base: {
+          enabled: true,
+          rpcUrl: "https://base-rpc.example.com",
+          quoteTokens: {
+            cbbtc: {
+              address: "0x1111111111111111111111111111111111111111",
+              coingeckoId: "coinbase-wrapped-btc",
+            },
+          },
+        },
+      },
+      funded: { targetExitPriceUsd: 0.1 },
+    });
+
+    const config = loadConfig(CONFIG_FILE);
+    expect(config.chains[0].chainConfig.quoteTokens.CBBTC).toBe(
+      "0x1111111111111111111111111111111111111111",
+    );
+    expect(config.chains[0].chainConfig.coingeckoIds.quoteTokens.CBBTC).toBe(
+      "coinbase-wrapped-btc",
+    );
+    expect(config.chains[0].chainConfig.quoteTokens.USDC).toBeDefined();
+  });
+
+  it("requires coingeckoId for new quote tokens in coingecko mode", () => {
+    writeConfig({
+      chains: {
+        base: {
+          enabled: true,
+          rpcUrl: "https://base-rpc.example.com",
+          quoteTokens: {
+            cbbtc: {
+              address: "0x1111111111111111111111111111111111111111",
+            },
+          },
+        },
+      },
+      funded: { targetExitPriceUsd: 0.1 },
+    });
+
+    expect(() => loadConfig(CONFIG_FILE)).toThrow(
+      "chains.base.quoteTokens.cbbtc.coingeckoId is required",
+    );
+  });
+
+  it("allows address-only quote token overrides in alchemy mode", () => {
+    delete process.env.COINGECKO_API_KEY;
+    writeConfig({
+      chains: {
+        base: {
+          enabled: true,
+          rpcUrl: "https://base-rpc.example.com",
+          quoteTokens: {
+            cbbtc: {
+              address: "0x1111111111111111111111111111111111111111",
+            },
+          },
+        },
+      },
+      pricing: {
+        provider: "alchemy",
+      },
+      funded: { targetExitPriceUsd: 0.1 },
+    });
+
+    const config = loadConfig(CONFIG_FILE);
+    expect(config.chains[0].chainConfig.quoteTokens.CBBTC).toBe(
+      "0x1111111111111111111111111111111111111111",
+    );
+    expect(config.chains[0].chainConfig.coingeckoIds.quoteTokens.CBBTC).toBeUndefined();
+  });
+
   it("loads PRIVATE_KEY_FILE when configured", () => {
     delete process.env.PRIVATE_KEY;
     process.env.PRIVATE_KEY_FILE = writeSecretFile("trading.key", `${DEFAULT_PRIVATE_KEY}\n`);
@@ -437,5 +512,34 @@ describe("config", () => {
         USDC: "0x01020304",
       },
     });
+  });
+
+  it("normalizes flash-arb route symbols to uppercase", () => {
+    writeConfig({
+      chains: {
+        base: { enabled: true, rpcUrl: "https://base-rpc.example.com" },
+      },
+      strategy: "flash-arb",
+      flashArb: {
+        routes: {
+          base: {
+            quoterAddress: "0x1111111111111111111111111111111111111111",
+            flashLoanPools: {
+              usdc: "0x2222222222222222222222222222222222222222",
+            },
+            quoteToAjnaPaths: {
+              usdc: "0x01020304",
+            },
+          },
+        },
+      },
+      dryRun: true,
+    });
+
+    const config = loadConfig(CONFIG_FILE);
+    expect(config.flashArb.routes.base?.flashLoanPools.USDC).toBe(
+      "0x2222222222222222222222222222222222222222",
+    );
+    expect(config.flashArb.routes.base?.quoteToAjnaPaths.USDC).toBe("0x01020304");
   });
 });
