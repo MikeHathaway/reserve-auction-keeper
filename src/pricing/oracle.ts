@@ -4,7 +4,15 @@ import type { ChainConfig } from "../chains/index.js";
 import type { Address } from "viem";
 import { logger } from "../utils/logger.js";
 
-export type PriceProvider = "coingecko" | "alchemy" | "dual";
+export type PriceProvider = "coingecko" | "alchemy" | "hybrid";
+
+export function requiresCoingeckoPricing(provider: PriceProvider): boolean {
+  return provider === "coingecko" || provider === "hybrid";
+}
+
+export function requiresAlchemyPricing(provider: PriceProvider): boolean {
+  return provider === "alchemy" || provider === "hybrid";
+}
 
 export interface PriceData {
   ajnaPriceUsd: number;
@@ -407,7 +415,7 @@ export function createPriceOracle(
       const alchemyQuotePrice = alchemyQuotePricesBySymbol.get(quoteTokenSymbol) ?? null;
 
       if (!coingeckoQuotePrice && !alchemyQuotePrice) {
-        logger.alert("Dual quote price feed unavailable", {
+        logger.alert("Hybrid quote price feed unavailable", {
           chain: chainConfig.name,
           quoteTokenSymbol,
           coingeckoAvailable: false,
@@ -427,7 +435,7 @@ export function createPriceOracle(
           logger.warn("Price data is stale, pausing execution", {
             chain: chainConfig.name,
             quoteTokenSymbol,
-            source: "dual",
+            source: "hybrid",
           });
         }
 
@@ -438,7 +446,7 @@ export function createPriceOracle(
         );
 
         if (quoteDiverged) {
-          logger.alert("Dual quote price feeds diverged, pausing execution", {
+          logger.alert("Hybrid quote price feeds diverged, pausing execution", {
             chain: chainConfig.name,
             quoteTokenSymbol,
             quote: {
@@ -456,14 +464,14 @@ export function createPriceOracle(
             coingeckoQuotePrice.quoteTokenPriceUsd,
             alchemyQuotePrice.quoteTokenPriceUsd,
           ),
-          source: "dual",
+          source: "hybrid",
           isStale,
         });
         continue;
       }
 
       if (coingeckoQuotePrice) {
-        logger.warn("Dual price feed degraded, falling back to CoinGecko quote price", {
+        logger.warn("Hybrid price feed degraded, falling back to CoinGecko quote price", {
           chain: chainConfig.name,
           quoteTokenSymbol,
           missingSource: "alchemy",
@@ -474,20 +482,20 @@ export function createPriceOracle(
           logger.warn("Price data is stale, pausing execution", {
             chain: chainConfig.name,
             quoteTokenSymbol,
-            source: "dual",
+            source: "hybrid",
           });
         }
 
         results.set(quoteTokenSymbol, {
           ajnaPriceUsd: coingeckoAjnaPrice.ajnaPriceUsd,
           quoteTokenPriceUsd: coingeckoQuotePrice.quoteTokenPriceUsd,
-          source: "dual",
+          source: "hybrid",
           isStale,
         });
         continue;
       }
 
-      logger.warn("Dual price feed degraded, falling back to Alchemy quote price", {
+      logger.warn("Hybrid price feed degraded, falling back to Alchemy quote price", {
         chain: chainConfig.name,
         quoteTokenSymbol,
         missingSource: "coingecko",
@@ -497,7 +505,7 @@ export function createPriceOracle(
       results.set(quoteTokenSymbol, {
         ajnaPriceUsd: coingeckoAjnaPrice.ajnaPriceUsd,
         quoteTokenPriceUsd: alchemyQuotePrice!.quoteTokenPriceUsd,
-        source: "dual",
+        source: "hybrid",
         isStale,
       });
     }

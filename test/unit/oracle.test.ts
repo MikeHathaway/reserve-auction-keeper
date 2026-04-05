@@ -28,10 +28,10 @@ describe("oracle", () => {
       });
     });
 
-    it("returns conservative dual prices when feeds agree", async () => {
+    it("returns conservative hybrid prices when feeds agree", async () => {
       const oracle = createPriceOracle(
         {
-          provider: "dual",
+          provider: "hybrid",
           coingecko: {
             getPrice: async (tokenId: string) => tokenId === "ajna-protocol" ? 0.003 : 1.01,
             getPrices: async (tokenIds: string[]) =>
@@ -52,15 +52,15 @@ describe("oracle", () => {
       await expect(oracle.getPrices("USDC")).resolves.toEqual({
         ajnaPriceUsd: 0.003,
         quoteTokenPriceUsd: 1,
-        source: "dual",
+        source: "hybrid",
         isStale: false,
       });
     });
 
-    it("returns null when dual quote feeds diverge beyond threshold", async () => {
+    it("returns null when hybrid quote feeds diverge beyond threshold", async () => {
       const oracle = createPriceOracle(
         {
-          provider: "dual",
+          provider: "hybrid",
           coingecko: {
             getPrice: async (tokenId: string) => tokenId === "ajna-protocol" ? 0.003 : 1,
             getPrices: async (tokenIds: string[]) =>
@@ -84,7 +84,7 @@ describe("oracle", () => {
     it("falls back to CoinGecko quote price when Alchemy quote price is unavailable", async () => {
       const oracle = createPriceOracle(
         {
-          provider: "dual",
+          provider: "hybrid",
           coingecko: {
             getPrice: async (tokenId: string) => tokenId === "ajna-protocol" ? 0.003 : 1,
             getPrices: async (tokenIds: string[]) =>
@@ -102,7 +102,7 @@ describe("oracle", () => {
       await expect(oracle.getPrices("USDC")).resolves.toEqual({
         ajnaPriceUsd: 0.003,
         quoteTokenPriceUsd: 1,
-        source: "dual",
+        source: "hybrid",
         isStale: false,
       });
     });
@@ -110,7 +110,7 @@ describe("oracle", () => {
     it("falls back to Alchemy quote price when CoinGecko quote price is unavailable", async () => {
       const oracle = createPriceOracle(
         {
-          provider: "dual",
+          provider: "hybrid",
           coingecko: {
             getPrice: async (tokenId: string) => tokenId === "ajna-protocol" ? 0.003 : null,
             getPrices: async () =>
@@ -133,15 +133,15 @@ describe("oracle", () => {
       await expect(oracle.getPrices("USDC")).resolves.toEqual({
         ajnaPriceUsd: 0.003,
         quoteTokenPriceUsd: 1,
-        source: "dual",
+        source: "hybrid",
         isStale: false,
       });
     });
 
-    it("returns null when CoinGecko AJNA price is unavailable in dual mode", async () => {
+    it("returns null when CoinGecko AJNA price is unavailable in hybrid mode", async () => {
       const oracle = createPriceOracle(
         {
-          provider: "dual",
+          provider: "hybrid",
           coingecko: {
             getPrice: async () => null,
             getPrices: async () => new Map(),
@@ -175,7 +175,7 @@ describe("oracle", () => {
         ]));
       const oracle = createPriceOracle(
         {
-          provider: "dual",
+          provider: "hybrid",
           coingecko: {
             getPrice: async () => null,
             getPrices: coingeckoGetPrices,
@@ -200,13 +200,13 @@ describe("oracle", () => {
       expect(pricesByToken.get("USDC")).toEqual({
         ajnaPriceUsd: 0.003,
         quoteTokenPriceUsd: 1,
-        source: "dual",
+        source: "hybrid",
         isStale: false,
       });
       expect(pricesByToken.get("WETH")).toEqual({
         ajnaPriceUsd: 0.003,
         quoteTokenPriceUsd: 2495,
-        source: "dual",
+        source: "hybrid",
         isStale: false,
       });
     });

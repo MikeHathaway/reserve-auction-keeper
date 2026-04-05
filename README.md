@@ -23,9 +23,9 @@ Current status: funded strategy supports live execution. Mainnet uses a single-t
 - An Ethereum wallet with AJNA (Mainnet) or bwAJNA (Base) tokens
 - RPC endpoints for Mainnet and/or Base
 - Price API credentials for your chosen provider:
-  `COINGECKO_API_KEY` for `pricing.provider = "coingecko"` or `"dual"`
+  `COINGECKO_API_KEY` for `pricing.provider = "coingecko"` or `"hybrid"`
   `COINGECKO_API_PLAN=demo|pro|auto` optionally pins the CoinGecko host/header, default `auto`
-  `ALCHEMY_API_KEY` for `pricing.provider = "alchemy"` or `"dual"`
+  `ALCHEMY_API_KEY` for `pricing.provider = "alchemy"` or `"hybrid"`
   `RPC_PROVIDER=alchemy` + `RPC_API_KEY` can be reused for Alchemy pricing automatically
 
 ### Setup
@@ -216,10 +216,10 @@ Flash-arb borrows AJNA or bwAJNA from a configured Uniswap V3 pool, calls `takeR
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `dryRun` | `true` | Log opportunities without executing. **Start here.** |
-| `pricing.provider` | `coingecko` | Price source: `coingecko`, `alchemy`, or asymmetric `dual` cross-check mode |
+| `pricing.provider` | `coingecko` | Price source: `coingecko`, `alchemy`, or asymmetric `hybrid` cross-check mode |
 | `COINGECKO_API_PLAN` | `auto` | CoinGecko auth mode: `demo`, `pro`, or `auto` host detection |
 | `chains.<chain>.quoteTokens.<symbol>.address` | unset | Adds or overrides a quote token whitelist entry for auto-discovery on that chain |
-| `chains.<chain>.quoteTokens.<symbol>.coingeckoId` | unset | Required for new tokens when `pricing.provider` is `coingecko` or `dual`; optional in `alchemy` mode |
+| `chains.<chain>.quoteTokens.<symbol>.coingeckoId` | unset | Required for new tokens when `pricing.provider` is `coingecko` or `hybrid`; optional in `alchemy` mode |
 | `funded.targetExitPriceUsd` | `0.10` | Minimum USD value of quote tokens received per AJNA spent |
 | `funded.autoApprove` | `false` | Auto-approve AJNA spending for pools |
 | `flashArb.maxSlippagePercent` | `1` | Slippage tolerance applied to quoted AJNA output before execution |
@@ -241,9 +241,9 @@ Flash-arb borrows AJNA or bwAJNA from a configured Uniswap V3 pool, calls `takeR
 
 - **Dry run by default.** The bot will not execute any transactions until you set `dryRun: false`.
 - **Use a dedicated hot wallet.** Never use your main wallet. Fund it with only the AJNA you're willing to trade.
-- **`dual` pricing is asymmetric by design.** CoinGecko is the primary AJNA feed, while the quote-token leg is cross-checked against Alchemy when both are available. The keeper pauses if CoinGecko AJNA is unavailable, if both quote feeds are unavailable, or if the quote feeds diverge beyond the configured threshold.
+- **`hybrid` pricing is asymmetric by design.** CoinGecko is the primary AJNA feed, while the quote-token leg is cross-checked against Alchemy when both are available. The keeper pauses if CoinGecko AJNA is unavailable, if both quote feeds are unavailable, or if the quote feeds diverge beyond the configured threshold.
 - **CoinGecko Demo and Pro keys are both supported.** `COINGECKO_API_PLAN=auto` will switch hosts if CoinGecko returns an auth host mismatch, and `demo`/`pro` lets you pin it up front.
-- **Custom quote tokens are config-driven and additive.** Add them under `chains.<chain>.quoteTokens` without changing source code. They merge with the built-in per-chain whitelist unless you explicitly override an existing symbol. In `coingecko` or `dual` mode, each new symbol also needs a `coingeckoId`.
+- **Custom quote tokens are config-driven and additive.** Add them under `chains.<chain>.quoteTokens` without changing source code. They merge with the built-in per-chain whitelist unless you explicitly override an existing symbol. In `coingecko` or `hybrid` mode, each new symbol also needs a `coingeckoId`.
 - **Prefer file or keystore secret inputs.** `PRIVATE_KEY_FILE` or `KEYSTORE_PATH` + `KEYSTORE_PASSWORD_FILE` keeps raw trading keys out of your shell environment.
 - **Mainnet live mode uses single-tx Flashbots bundles.** The keeper prepares, signs, simulates, and submits a raw bundle, then retries across up to 3 target blocks.
 - **Persist the Flashbots auth key.** `FLASHBOTS_AUTH_KEY_FILE` keeps a stable relay identity across restarts instead of generating a fresh one every boot.

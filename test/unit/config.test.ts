@@ -169,6 +169,21 @@ describe("config", () => {
     expect(config.secrets.alchemyApiKey).toBe("test-alchemy-price-key");
   });
 
+  it("loads hybrid pricing provider", () => {
+    writeConfig({
+      chains: {
+        base: { enabled: true, rpcUrl: "https://base-rpc.example.com" },
+      },
+      pricing: {
+        provider: "hybrid",
+      },
+      funded: { targetExitPriceUsd: 0.1 },
+    });
+
+    const config = loadConfig(CONFIG_FILE);
+    expect(config.pricing.provider).toBe("hybrid");
+  });
+
   it("defaults COINGECKO_API_PLAN to auto", () => {
     writeConfig({
       chains: {
@@ -234,7 +249,7 @@ describe("config", () => {
         base: { enabled: true, rpcUrl: "https://base-rpc.example.com" },
       },
       pricing: {
-        provider: "alchemy",
+        provider: "hybrid",
       },
       funded: { targetExitPriceUsd: 0.1 },
     });

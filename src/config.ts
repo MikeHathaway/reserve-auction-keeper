@@ -3,7 +3,11 @@ import { readFileSync } from "node:fs";
 import { isAddress, type Address, type Hex } from "viem";
 import { CHAIN_CONFIGS, buildRpcUrl, type ChainConfig, type RpcProvider } from "./chains/index.js";
 import { loadOptionalHexSecret, resolvePrivateKeyFromEnv } from "./utils/secrets.js";
-import type { PriceProvider } from "./pricing/oracle.js";
+import {
+  requiresAlchemyPricing,
+  requiresCoingeckoPricing,
+  type PriceProvider,
+} from "./pricing/oracle.js";
 import type { CoingeckoApiPlan } from "./pricing/coingecko.js";
 
 const addressSchema = z.string().refine(isAddress, "Invalid Ethereum address");
@@ -37,7 +41,7 @@ const configFileSchema = z.object({
   }),
   pricing: z
     .object({
-      provider: z.enum(["coingecko", "alchemy", "dual"]).default("coingecko"),
+      provider: z.enum(["coingecko", "alchemy", "hybrid"]).default("coingecko"),
     })
     .optional(),
   strategy: z.enum(["funded", "flash-arb"]).default("funded"),
@@ -171,7 +175,7 @@ function mergeChainConfig(
       continue;
     }
 
-    if (!mergedCoingeckoIds[symbol] && (priceProvider === "coingecko" || priceProvider === "dual")) {
+    if (!mergedCoingeckoIds[symbol] && requiresCoingeckoPricing(priceProvider)) {
       throw new Error(
         `chains.${chainName}.quoteTokens.${rawSymbol}.coingeckoId is required for the selected pricing provider`,
       );
@@ -244,11 +248,11 @@ function loadEnvSecrets(priceProvider: PriceProvider): EnvSecrets {
     throw new Error("COINGECKO_API_PLAN must be one of: auto, demo, pro");
   }
 
-  if ((priceProvider === "coingecko" || priceProvider === "dual") && !coingeckoApiKey) {
+  if (requiresCoingeckoPricing(priceProvider) && !coingeckoApiKey) {
     throw new Error("COINGECKO_API_KEY is required for the selected pricing provider");
   }
 
-  if ((priceProvider === "alchemy" || priceProvider === "dual") && !alchemyApiKey) {
+  if (requiresAlchemyPricing(priceProvider) && !alchemyApiKey) {
     throw new Error(
       "ALCHEMY_API_KEY is required for the selected pricing provider unless RPC_PROVIDER=alchemy with RPC_API_KEY set",
     );
@@ -272,7 +276,7 @@ function loadEnvSecrets(priceProvider: PriceProvider): EnvSecrets {
 export function loadConfig(configPath: string): AppConfig {
   const raw = readFileSync(configPath, "utf-8");
   const parsed = configFileSchema.parse(JSON.parse(raw));
-  const pricing = parsed.pricing || { provider: "coingecko" as const };
+  const pricing = { provider: (parsed.pricing?.provider ?? "coingecko") as PriceProvider };
   const secrets = loadEnvSecrets(pricing.provider);
 
   const chains: ResolvedChainConfig[] = [];

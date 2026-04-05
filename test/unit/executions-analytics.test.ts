@@ -14,7 +14,7 @@ describe("execution analytics", () => {
       pool: "0xpool",
       strategy: "funded",
       quoteTokenSymbol: "USDC",
-      priceSource: "dual",
+      priceSource: "hybrid",
       submissionMode: "private-rpc",
       estimatedProfitUsd: "12.3400",
       realizedProfitUsd: "11.1200",
@@ -33,7 +33,7 @@ describe("execution analytics", () => {
     expect(success).toMatchObject({
       kind: "success",
       strategy: "funded",
-      priceSource: "dual",
+      priceSource: "hybrid",
       estimatedProfitUsd: 12.34,
       realizedProfitUsd: 11.12,
     });
@@ -52,7 +52,7 @@ describe("execution analytics", () => {
         pool: "0xpool-a",
         strategy: "funded",
         quoteTokenSymbol: "USDC",
-        priceSource: "dual",
+        priceSource: "hybrid",
         submissionMode: "private-rpc",
         estimatedProfitUsd: "10.50",
         realizedProfitUsd: "9.90",
@@ -74,7 +74,7 @@ describe("execution analytics", () => {
         pool: "0xpool-c",
         strategy: "funded",
         quoteTokenSymbol: "USDC",
-        priceSource: "dual",
+        priceSource: "hybrid",
         error: "simulation failed",
       })),
     ].filter((event): event is NonNullable<typeof event> => event !== null);
