@@ -216,7 +216,7 @@ Flash-arb borrows AJNA or bwAJNA from a configured Uniswap V3 pool, calls `takeR
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `dryRun` | `true` | Log opportunities without executing. **Start here.** |
-| `pricing.provider` | `coingecko` | Price source: `coingecko`, `alchemy`, or strict `dual` agreement mode |
+| `pricing.provider` | `coingecko` | Price source: `coingecko`, `alchemy`, or asymmetric `dual` cross-check mode |
 | `COINGECKO_API_PLAN` | `auto` | CoinGecko auth mode: `demo`, `pro`, or `auto` host detection |
 | `chains.<chain>.quoteTokens.<symbol>.address` | unset | Adds or overrides a quote token whitelist entry for auto-discovery on that chain |
 | `chains.<chain>.quoteTokens.<symbol>.coingeckoId` | unset | Required for new tokens when `pricing.provider` is `coingecko` or `dual`; optional in `alchemy` mode |
@@ -241,7 +241,7 @@ Flash-arb borrows AJNA or bwAJNA from a configured Uniswap V3 pool, calls `takeR
 
 - **Dry run by default.** The bot will not execute any transactions until you set `dryRun: false`.
 - **Use a dedicated hot wallet.** Never use your main wallet. Fund it with only the AJNA you're willing to trade.
-- **`dual` pricing is strict by design.** The keeper pauses execution if CoinGecko and Alchemy disagree beyond the configured divergence threshold or if either feed is unavailable.
+- **`dual` pricing is asymmetric by design.** CoinGecko is the primary AJNA feed, while the quote-token leg is cross-checked against Alchemy when both are available. The keeper pauses if CoinGecko AJNA is unavailable, if both quote feeds are unavailable, or if the quote feeds diverge beyond the configured threshold.
 - **CoinGecko Demo and Pro keys are both supported.** `COINGECKO_API_PLAN=auto` will switch hosts if CoinGecko returns an auth host mismatch, and `demo`/`pro` lets you pin it up front.
 - **Custom quote tokens are config-driven and additive.** Add them under `chains.<chain>.quoteTokens` without changing source code. They merge with the built-in per-chain whitelist unless you explicitly override an existing symbol. In `coingecko` or `dual` mode, each new symbol also needs a `coingeckoId`.
 - **Prefer file or keystore secret inputs.** `PRIVATE_KEY_FILE` or `KEYSTORE_PATH` + `KEYSTORE_PASSWORD_FILE` keeps raw trading keys out of your shell environment.

@@ -26,6 +26,16 @@ interface SingleSourcePriceData {
   isStale: boolean;
 }
 
+interface AjnaSourcePriceData {
+  ajnaPriceUsd: number;
+  isStale: boolean;
+}
+
+interface QuoteSourcePriceData {
+  quoteTokenPriceUsd: number;
+  isStale: boolean;
+}
+
 interface PriceOracleOptions {
   provider: PriceProvider;
   coingecko?: CoingeckoClient;
@@ -40,13 +50,16 @@ export function createPriceOracle(
     return [...new Set(quoteTokenSymbols)];
   }
 
-  async function getCoingeckoBatchPrices(
+  async function getCoingeckoPriceInputs(
     quoteTokenSymbols: string[],
-  ): Promise<Map<string, SingleSourcePriceData | null>> {
-    const results = new Map<string, SingleSourcePriceData | null>();
+  ): Promise<{
+    ajnaPrice: AjnaSourcePriceData | null;
+    quotePrices: Map<string, QuoteSourcePriceData | null>;
+  }> {
+    const quotePrices = new Map<string, QuoteSourcePriceData | null>();
     const uniqueQuoteTokenSymbols = dedupeQuoteTokenSymbols(quoteTokenSymbols);
     if (uniqueQuoteTokenSymbols.length === 0) {
-      return results;
+      return { ajnaPrice: null, quotePrices };
     }
 
     const coingecko = options.coingecko;
@@ -64,7 +77,7 @@ export function createPriceOracle(
           chain: chainConfig.name,
           quoteTokenSymbol,
         });
-        results.set(quoteTokenSymbol, null);
+        quotePrices.set(quoteTokenSymbol, null);
         continue;
       }
 
@@ -72,31 +85,31 @@ export function createPriceOracle(
     }
 
     if (quoteTokenIds.size === 0) {
-      return results;
+      return { ajnaPrice: null, quotePrices };
     }
 
     const fetchedPrices = await coingecko.getPrices([
       ajnaId,
       ...new Set(quoteTokenIds.values()),
     ]);
-    const ajnaPrice = fetchedPrices.get(ajnaId) ?? null;
+    const fetchedAjnaPrice = fetchedPrices.get(ajnaId) ?? null;
+    const ajnaPrice = fetchedAjnaPrice == null
+      ? null
+      : {
+          ajnaPriceUsd: fetchedAjnaPrice,
+          isStale: coingecko.isPriceStale(ajnaId),
+        };
 
     if (ajnaPrice == null) {
       logger.alert("Coingecko AJNA price feed unavailable", {
         chain: chainConfig.name,
-        ajnaPrice,
+        ajnaPrice: fetchedAjnaPrice,
         quoteTokenSymbols: uniqueQuoteTokenSymbols,
       });
-      for (const quoteTokenSymbol of uniqueQuoteTokenSymbols) {
-        if (!results.has(quoteTokenSymbol)) {
-          results.set(quoteTokenSymbol, null);
-        }
-      }
-      return results;
     }
 
     for (const quoteTokenSymbol of uniqueQuoteTokenSymbols) {
-      if (results.has(quoteTokenSymbol)) continue;
+      if (quotePrices.has(quoteTokenSymbol)) continue;
 
       const quoteId = quoteTokenIds.get(quoteTokenSymbol)!;
       const quotePrice = fetchedPrices.get(quoteId) ?? null;
@@ -106,15 +119,47 @@ export function createPriceOracle(
           quoteTokenSymbol,
           quoteId,
         });
+        quotePrices.set(quoteTokenSymbol, null);
+        continue;
+      }
+
+      quotePrices.set(quoteTokenSymbol, {
+        quoteTokenPriceUsd: quotePrice,
+        isStale: coingecko.isPriceStale(quoteId),
+      });
+    }
+
+    return { ajnaPrice, quotePrices };
+  }
+
+  async function getCoingeckoBatchPrices(
+    quoteTokenSymbols: string[],
+  ): Promise<Map<string, SingleSourcePriceData | null>> {
+    const results = new Map<string, SingleSourcePriceData | null>();
+    const uniqueQuoteTokenSymbols = dedupeQuoteTokenSymbols(quoteTokenSymbols);
+    if (uniqueQuoteTokenSymbols.length === 0) {
+      return results;
+    }
+
+    const { ajnaPrice, quotePrices } = await getCoingeckoPriceInputs(uniqueQuoteTokenSymbols);
+    if (ajnaPrice == null) {
+      for (const quoteTokenSymbol of uniqueQuoteTokenSymbols) {
+        results.set(quoteTokenSymbol, null);
+      }
+      return results;
+    }
+
+    for (const quoteTokenSymbol of uniqueQuoteTokenSymbols) {
+      const quotePrice = quotePrices.get(quoteTokenSymbol) ?? null;
+      if (!quotePrice) {
         results.set(quoteTokenSymbol, null);
         continue;
       }
 
       results.set(quoteTokenSymbol, {
-        ajnaPriceUsd: ajnaPrice,
-        quoteTokenPriceUsd: quotePrice,
-        isStale:
-          coingecko.isPriceStale(ajnaId) || coingecko.isPriceStale(quoteId),
+        ajnaPriceUsd: ajnaPrice.ajnaPriceUsd,
+        quoteTokenPriceUsd: quotePrice.quoteTokenPriceUsd,
+        isStale: ajnaPrice.isStale || quotePrice.isStale,
       });
     }
 
@@ -211,6 +256,78 @@ export function createPriceOracle(
     return results;
   }
 
+  async function getAlchemyQuoteBatchPrices(
+    quoteTokenSymbols: string[],
+  ): Promise<Map<string, QuoteSourcePriceData | null>> {
+    const results = new Map<string, QuoteSourcePriceData | null>();
+    const uniqueQuoteTokenSymbols = dedupeQuoteTokenSymbols(quoteTokenSymbols);
+    if (uniqueQuoteTokenSymbols.length === 0) {
+      return results;
+    }
+
+    const alchemy = options.alchemy;
+    if (!alchemy) {
+      throw new Error("Alchemy client is required for the selected pricing mode.");
+    }
+
+    if (!chainConfig.alchemySlug) {
+      logger.error("No Alchemy network slug configured for chain", {
+        chain: chainConfig.name,
+      });
+      for (const quoteTokenSymbol of uniqueQuoteTokenSymbols) {
+        results.set(quoteTokenSymbol, null);
+      }
+      return results;
+    }
+
+    const quoteTokenAddresses = new Map<string, Address>();
+    for (const quoteTokenSymbol of uniqueQuoteTokenSymbols) {
+      const quoteTokenAddress = chainConfig.quoteTokens[quoteTokenSymbol];
+      if (!quoteTokenAddress) {
+        logger.error("No quote token address configured for Alchemy pricing", {
+          chain: chainConfig.name,
+          quoteTokenSymbol,
+        });
+        results.set(quoteTokenSymbol, null);
+        continue;
+      }
+
+      quoteTokenAddresses.set(quoteTokenSymbol, quoteTokenAddress);
+    }
+
+    if (quoteTokenAddresses.size === 0) {
+      return results;
+    }
+
+    const prices = await alchemy.getPrices(
+      chainConfig.alchemySlug,
+      [...new Set(quoteTokenAddresses.values())] as Address[],
+    );
+
+    for (const quoteTokenSymbol of uniqueQuoteTokenSymbols) {
+      if (results.has(quoteTokenSymbol)) continue;
+
+      const quoteTokenAddress = quoteTokenAddresses.get(quoteTokenSymbol)!;
+      const quotePrice = prices.get(quoteTokenAddress) ?? null;
+      if (quotePrice == null) {
+        logger.alert("Alchemy quote-token price feed unavailable", {
+          chain: chainConfig.name,
+          quoteTokenSymbol,
+          quoteTokenAddress,
+        });
+        results.set(quoteTokenSymbol, null);
+        continue;
+      }
+
+      results.set(quoteTokenSymbol, {
+        quoteTokenPriceUsd: quotePrice,
+        isStale: alchemy.isPriceStale(chainConfig.alchemySlug, quoteTokenAddress),
+      });
+    }
+
+    return results;
+  }
+
   async function getPricesForQuoteTokens(
     quoteTokenSymbols: string[],
   ): Promise<Map<string, PriceData | null>> {
@@ -272,73 +389,114 @@ export function createPriceOracle(
       return results;
     }
 
-    const [coingeckoPricesBySymbol, alchemyPricesBySymbol] = await Promise.all([
-      getCoingeckoBatchPrices(uniqueQuoteTokenSymbols),
-      getAlchemyBatchPrices(uniqueQuoteTokenSymbols),
+    const [coingeckoInputs, alchemyQuotePricesBySymbol] = await Promise.all([
+      getCoingeckoPriceInputs(uniqueQuoteTokenSymbols),
+      getAlchemyQuoteBatchPrices(uniqueQuoteTokenSymbols),
     ]);
 
+    const coingeckoAjnaPrice = coingeckoInputs.ajnaPrice;
+    if (!coingeckoAjnaPrice) {
+      for (const quoteTokenSymbol of uniqueQuoteTokenSymbols) {
+        results.set(quoteTokenSymbol, null);
+      }
+      return results;
+    }
+
     for (const quoteTokenSymbol of uniqueQuoteTokenSymbols) {
-      const coingeckoPrices = coingeckoPricesBySymbol.get(quoteTokenSymbol) ?? null;
-      const alchemyPrices = alchemyPricesBySymbol.get(quoteTokenSymbol) ?? null;
+      const coingeckoQuotePrice = coingeckoInputs.quotePrices.get(quoteTokenSymbol) ?? null;
+      const alchemyQuotePrice = alchemyQuotePricesBySymbol.get(quoteTokenSymbol) ?? null;
 
-      if (!coingeckoPrices || !alchemyPrices) {
-        logger.alert("Dual price feed unavailable", {
+      if (!coingeckoQuotePrice && !alchemyQuotePrice) {
+        logger.alert("Dual quote price feed unavailable", {
           chain: chainConfig.name,
           quoteTokenSymbol,
-          coingeckoAvailable: !!coingeckoPrices,
-          alchemyAvailable: !!alchemyPrices,
+          coingeckoAvailable: false,
+          alchemyAvailable: false,
         });
         results.set(quoteTokenSymbol, null);
         continue;
       }
 
-      const isStale = coingeckoPrices.isStale || alchemyPrices.isStale;
+      if (coingeckoQuotePrice && alchemyQuotePrice) {
+        const isStale =
+          coingeckoAjnaPrice.isStale ||
+          coingeckoQuotePrice.isStale ||
+          alchemyQuotePrice.isStale;
 
-      if (isStale) {
-        logger.warn("Price data is stale, pausing execution", {
-          chain: chainConfig.name,
-          quoteTokenSymbol,
+        if (isStale) {
+          logger.warn("Price data is stale, pausing execution", {
+            chain: chainConfig.name,
+            quoteTokenSymbol,
+            source: "dual",
+          });
+        }
+
+        const quoteDiverged = checkPriceDivergence(
+          coingeckoQuotePrice.quoteTokenPriceUsd,
+          alchemyQuotePrice.quoteTokenPriceUsd,
+          `${chainConfig.name}.${quoteTokenSymbol}`,
+        );
+
+        if (quoteDiverged) {
+          logger.alert("Dual quote price feeds diverged, pausing execution", {
+            chain: chainConfig.name,
+            quoteTokenSymbol,
+            quote: {
+              coingecko: coingeckoQuotePrice.quoteTokenPriceUsd,
+              alchemy: alchemyQuotePrice.quoteTokenPriceUsd,
+            },
+          });
+          results.set(quoteTokenSymbol, null);
+          continue;
+        }
+
+        results.set(quoteTokenSymbol, {
+          ajnaPriceUsd: coingeckoAjnaPrice.ajnaPriceUsd,
+          quoteTokenPriceUsd: Math.min(
+            coingeckoQuotePrice.quoteTokenPriceUsd,
+            alchemyQuotePrice.quoteTokenPriceUsd,
+          ),
           source: "dual",
+          isStale,
         });
-      }
-
-      const ajnaDiverged = checkPriceDivergence(
-        coingeckoPrices.ajnaPriceUsd,
-        alchemyPrices.ajnaPriceUsd,
-        `${chainConfig.name}.ajna`,
-      );
-      const quoteDiverged = checkPriceDivergence(
-        coingeckoPrices.quoteTokenPriceUsd,
-        alchemyPrices.quoteTokenPriceUsd,
-        `${chainConfig.name}.${quoteTokenSymbol}`,
-      );
-
-      if (ajnaDiverged || quoteDiverged) {
-        logger.alert("Dual price feeds diverged, pausing execution", {
-          chain: chainConfig.name,
-          quoteTokenSymbol,
-          ajna: {
-            coingecko: coingeckoPrices.ajnaPriceUsd,
-            alchemy: alchemyPrices.ajnaPriceUsd,
-          },
-          quote: {
-            coingecko: coingeckoPrices.quoteTokenPriceUsd,
-            alchemy: alchemyPrices.quoteTokenPriceUsd,
-          },
-        });
-        results.set(quoteTokenSymbol, null);
         continue;
       }
 
+      if (coingeckoQuotePrice) {
+        logger.warn("Dual price feed degraded, falling back to CoinGecko quote price", {
+          chain: chainConfig.name,
+          quoteTokenSymbol,
+          missingSource: "alchemy",
+        });
+
+        const isStale = coingeckoAjnaPrice.isStale || coingeckoQuotePrice.isStale;
+        if (isStale) {
+          logger.warn("Price data is stale, pausing execution", {
+            chain: chainConfig.name,
+            quoteTokenSymbol,
+            source: "dual",
+          });
+        }
+
+        results.set(quoteTokenSymbol, {
+          ajnaPriceUsd: coingeckoAjnaPrice.ajnaPriceUsd,
+          quoteTokenPriceUsd: coingeckoQuotePrice.quoteTokenPriceUsd,
+          source: "dual",
+          isStale,
+        });
+        continue;
+      }
+
+      logger.warn("Dual price feed degraded, falling back to Alchemy quote price", {
+        chain: chainConfig.name,
+        quoteTokenSymbol,
+        missingSource: "coingecko",
+      });
+
+      const isStale = coingeckoAjnaPrice.isStale || alchemyQuotePrice!.isStale;
       results.set(quoteTokenSymbol, {
-        ajnaPriceUsd: Math.max(
-          coingeckoPrices.ajnaPriceUsd,
-          alchemyPrices.ajnaPriceUsd,
-        ),
-        quoteTokenPriceUsd: Math.min(
-          coingeckoPrices.quoteTokenPriceUsd,
-          alchemyPrices.quoteTokenPriceUsd,
-        ),
+        ajnaPriceUsd: coingeckoAjnaPrice.ajnaPriceUsd,
+        quoteTokenPriceUsd: alchemyQuotePrice!.quoteTokenPriceUsd,
         source: "dual",
         isStale,
       });

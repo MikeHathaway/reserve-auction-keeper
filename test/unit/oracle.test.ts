@@ -41,7 +41,6 @@ describe("oracle", () => {
           alchemy: {
             getPrices: async () =>
               new Map([
-                [MAINNET_CONFIG.ajnaToken, 0.0031],
                 [MAINNET_CONFIG.quoteTokens.USDC, 1],
               ]),
             isPriceStale: () => false,
@@ -51,14 +50,14 @@ describe("oracle", () => {
       );
 
       await expect(oracle.getPrices("USDC")).resolves.toEqual({
-        ajnaPriceUsd: 0.0031,
+        ajnaPriceUsd: 0.003,
         quoteTokenPriceUsd: 1,
         source: "dual",
         isStale: false,
       });
     });
 
-    it("returns null when dual feeds diverge beyond threshold", async () => {
+    it("returns null when dual quote feeds diverge beyond threshold", async () => {
       const oracle = createPriceOracle(
         {
           provider: "dual",
@@ -71,7 +70,86 @@ describe("oracle", () => {
           alchemy: {
             getPrices: async () =>
               new Map([
-                [MAINNET_CONFIG.ajnaToken, 0.004],
+                [MAINNET_CONFIG.quoteTokens.USDC, 1.2],
+              ]),
+            isPriceStale: () => false,
+          },
+        },
+        MAINNET_CONFIG,
+      );
+
+      await expect(oracle.getPrices("USDC")).resolves.toBeNull();
+    });
+
+    it("falls back to CoinGecko quote price when Alchemy quote price is unavailable", async () => {
+      const oracle = createPriceOracle(
+        {
+          provider: "dual",
+          coingecko: {
+            getPrice: async (tokenId: string) => tokenId === "ajna-protocol" ? 0.003 : 1,
+            getPrices: async (tokenIds: string[]) =>
+              new Map(tokenIds.map((tokenId) => [tokenId, tokenId === "ajna-protocol" ? 0.003 : 1])),
+            isPriceStale: () => false,
+          },
+          alchemy: {
+            getPrices: async () => new Map(),
+            isPriceStale: () => false,
+          },
+        },
+        MAINNET_CONFIG,
+      );
+
+      await expect(oracle.getPrices("USDC")).resolves.toEqual({
+        ajnaPriceUsd: 0.003,
+        quoteTokenPriceUsd: 1,
+        source: "dual",
+        isStale: false,
+      });
+    });
+
+    it("falls back to Alchemy quote price when CoinGecko quote price is unavailable", async () => {
+      const oracle = createPriceOracle(
+        {
+          provider: "dual",
+          coingecko: {
+            getPrice: async (tokenId: string) => tokenId === "ajna-protocol" ? 0.003 : null,
+            getPrices: async () =>
+              new Map([
+                ["ajna-protocol", 0.003],
+              ]),
+            isPriceStale: () => false,
+          },
+          alchemy: {
+            getPrices: async () =>
+              new Map([
+                [MAINNET_CONFIG.quoteTokens.USDC, 1],
+              ]),
+            isPriceStale: () => false,
+          },
+        },
+        MAINNET_CONFIG,
+      );
+
+      await expect(oracle.getPrices("USDC")).resolves.toEqual({
+        ajnaPriceUsd: 0.003,
+        quoteTokenPriceUsd: 1,
+        source: "dual",
+        isStale: false,
+      });
+    });
+
+    it("returns null when CoinGecko AJNA price is unavailable in dual mode", async () => {
+      const oracle = createPriceOracle(
+        {
+          provider: "dual",
+          coingecko: {
+            getPrice: async () => null,
+            getPrices: async () => new Map(),
+            isPriceStale: () => true,
+          },
+          alchemy: {
+            getPrices: async () =>
+              new Map([
                 [MAINNET_CONFIG.quoteTokens.USDC, 1],
               ]),
             isPriceStale: () => false,
@@ -92,7 +170,6 @@ describe("oracle", () => {
         ]));
       const alchemyGetPrices = vi.fn(async () =>
         new Map([
-          [MAINNET_CONFIG.ajnaToken, 0.0031],
           [MAINNET_CONFIG.quoteTokens.USDC, 1],
           [MAINNET_CONFIG.quoteTokens.WETH, 2495],
         ]));
@@ -116,14 +193,18 @@ describe("oracle", () => {
 
       expect(coingeckoGetPrices).toHaveBeenCalledTimes(1);
       expect(alchemyGetPrices).toHaveBeenCalledTimes(1);
+      expect(alchemyGetPrices).toHaveBeenCalledWith(
+        MAINNET_CONFIG.alchemySlug,
+        [MAINNET_CONFIG.quoteTokens.USDC, MAINNET_CONFIG.quoteTokens.WETH],
+      );
       expect(pricesByToken.get("USDC")).toEqual({
-        ajnaPriceUsd: 0.0031,
+        ajnaPriceUsd: 0.003,
         quoteTokenPriceUsd: 1,
         source: "dual",
         isStale: false,
       });
       expect(pricesByToken.get("WETH")).toEqual({
-        ajnaPriceUsd: 0.0031,
+        ajnaPriceUsd: 0.003,
         quoteTokenPriceUsd: 2495,
         source: "dual",
         isStale: false,
