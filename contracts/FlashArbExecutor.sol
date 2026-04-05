@@ -39,10 +39,12 @@ interface ISwapRouterLike {
 
 contract FlashArbExecutor is IUniswapV3FlashCallback {
     error Unauthorized();
+    error UnauthorizedCallback();
     error InvalidAddress();
     error InvalidConfig();
     error InvalidFlashPool();
     error InvalidFactoryPool();
+    error InvalidBorrowBalance();
     error InvalidQuoteAmount();
     error UnsupportedBorrowToken();
     error InsufficientRepayment();
@@ -63,10 +65,13 @@ contract FlashArbExecutor is IUniswapV3FlashCallback {
     bytes32 public immutable uniswapV3PoolInitCodeHash;
     address public immutable owner;
 
+    address private activeFlashPool;
+    bytes32 private activeCallbackHash;
+
     event FlashArbExecuted(
         address indexed flashPool,
         address indexed ajnaPool,
-        uint256 quoteAmount,
+        uint256 quoteTokenAmount,
         uint256 borrowedAjna,
         uint256 repaidAjna,
         uint256 profitAjna
@@ -111,7 +116,11 @@ contract FlashArbExecutor is IUniswapV3FlashCallback {
             revert UnsupportedBorrowToken();
         }
 
+        activeFlashPool = params.flashPool;
+        activeCallbackHash = keccak256(abi.encode(params));
         flashPool.flash(address(this), amount0, amount1, abi.encode(params));
+        activeFlashPool = address(0);
+        activeCallbackHash = bytes32(0);
     }
 
     function uniswapV3FlashCallback(
@@ -121,8 +130,16 @@ contract FlashArbExecutor is IUniswapV3FlashCallback {
     ) external override {
         ExecuteParams memory params = abi.decode(data, (ExecuteParams));
         if (msg.sender != params.flashPool) revert InvalidFlashPool();
+        if (msg.sender != activeFlashPool || keccak256(data) != activeCallbackHash) {
+            revert UnauthorizedCallback();
+        }
+        activeFlashPool = address(0);
+        activeCallbackHash = bytes32(0);
         if (!_isCanonicalFactoryPool(params.flashPool)) revert InvalidFactoryPool();
 
+        uint256 startingAjnaBalance = IERC20Like(ajnaToken).balanceOf(address(this));
+        if (startingAjnaBalance < params.borrowAmount) revert InvalidBorrowBalance();
+        uint256 preExistingAjnaBalance = startingAjnaBalance - params.borrowAmount;
         uint256 repayAmount = params.borrowAmount + fee0 + fee1;
 
         _approveExact(ajnaToken, params.ajnaPool, params.borrowAmount);
@@ -155,7 +172,8 @@ contract FlashArbExecutor is IUniswapV3FlashCallback {
 
         _transferToken(ajnaToken, params.flashPool, repayAmount);
 
-        uint256 profit = IERC20Like(ajnaToken).balanceOf(address(this));
+        uint256 profit = IERC20Like(ajnaToken).balanceOf(address(this)) -
+            preExistingAjnaBalance;
         if (profit > 0) {
             _transferToken(ajnaToken, params.profitRecipient, profit);
         }
@@ -163,7 +181,7 @@ contract FlashArbExecutor is IUniswapV3FlashCallback {
         emit FlashArbExecuted(
             params.flashPool,
             params.ajnaPool,
-            quoteReceived,
+            quoteTokenAmount,
             params.borrowAmount,
             repayAmount,
             profit

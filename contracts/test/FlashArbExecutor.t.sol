@@ -2,7 +2,7 @@
 pragma solidity ^0.8.26;
 
 import {FlashArbExecutor} from "../FlashArbExecutor.sol";
-import {TestBase} from "./TestBase.sol";
+import {Log, TestBase} from "./TestBase.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockAjnaPool} from "./mocks/MockAjnaPool.sol";
 import {MockMalformedAjnaPool} from "./mocks/MockMalformedAjnaPool.sol";
@@ -70,6 +70,79 @@ contract FlashArbExecutorTest is TestBase {
         assertEq(ajna.balanceOf(profitRecipient), 4 * WAD, "profit recipient received profit");
         assertEq(ajna.balanceOf(address(ajnaPool)), 100 * WAD, "ajna pool burned borrowed ajna");
         assertEq(router.lastAmountIn(), QUOTE_TOKEN_RAW, "router swap consumed raw quote amount");
+    }
+
+    function test_executeFlashArb_keepsPreExistingAjnaAndEmitsRawQuoteAmount() public {
+        router.setNextAmountOut(105 * WAD);
+        ajna.mint(address(executor), 7 * WAD);
+
+        FlashArbExecutor.ExecuteParams memory params = FlashArbExecutor.ExecuteParams({
+            flashPool: address(flashPool),
+            ajnaPool: address(ajnaPool),
+            borrowAmount: 100 * WAD,
+            quoteAmount: QUOTE_TOKEN_WAD,
+            swapPath: hex"010203",
+            minAjnaOut: 104 * WAD,
+            profitRecipient: profitRecipient
+        });
+
+        vm.recordLogs();
+        executor.executeFlashArb(params);
+
+        Log[] memory logs = vm.getRecordedLogs();
+        assertEq(logs.length, 1, "should emit a single flash-arb event");
+
+        (uint256 quoteTokenAmount, uint256 borrowedAjna, uint256 repaidAjna, uint256 profitAjna) =
+            abi.decode(logs[0].data, (uint256, uint256, uint256, uint256));
+
+        assertEq(quoteTokenAmount, QUOTE_TOKEN_RAW, "event should emit raw quote token units");
+        assertEq(borrowedAjna, 100 * WAD, "event should emit borrowed ajna");
+        assertEq(repaidAjna, 101 * WAD, "event should emit repaid ajna");
+        assertEq(profitAjna, 4 * WAD, "event should emit only trade profit");
+        assertEq(ajna.balanceOf(address(executor)), 7 * WAD, "pre-existing ajna should remain in executor");
+        assertEq(ajna.balanceOf(profitRecipient), 4 * WAD, "profit recipient should receive only trade profit");
+    }
+
+    function test_executeFlashArb_repaysWhenAjnaIsToken1() public {
+        router.setNextAmountOut(105 * WAD);
+
+        MockUniswapV3Pool token1AjnaPool = MockUniswapV3Pool(
+            factory.createPool(address(quote), address(ajna), POOL_FEE, 0, 1 * WAD)
+        );
+        ajna.mint(address(token1AjnaPool), 200 * WAD);
+
+        FlashArbExecutor.ExecuteParams memory params = FlashArbExecutor.ExecuteParams({
+            flashPool: address(token1AjnaPool),
+            ajnaPool: address(ajnaPool),
+            borrowAmount: 100 * WAD,
+            quoteAmount: QUOTE_TOKEN_WAD,
+            swapPath: hex"010203",
+            minAjnaOut: 104 * WAD,
+            profitRecipient: profitRecipient
+        });
+
+        executor.executeFlashArb(params);
+
+        assertEq(ajna.balanceOf(address(token1AjnaPool)), 201 * WAD, "token1 flash pool repaid with fee");
+        assertEq(quote.balanceOf(address(router)), QUOTE_TOKEN_RAW, "router received raw quote");
+        assertEq(ajna.balanceOf(profitRecipient), 4 * WAD, "profit recipient received profit");
+    }
+
+    function test_uniswapV3FlashCallback_revertsWhenCallbackWasNotAuthorizedByOwner() public {
+        router.setNextAmountOut(105 * WAD);
+
+        FlashArbExecutor.ExecuteParams memory params = FlashArbExecutor.ExecuteParams({
+            flashPool: address(flashPool),
+            ajnaPool: address(ajnaPool),
+            borrowAmount: 100 * WAD,
+            quoteAmount: QUOTE_TOKEN_WAD,
+            swapPath: hex"010203",
+            minAjnaOut: 104 * WAD,
+            profitRecipient: profitRecipient
+        });
+
+        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutor.UnauthorizedCallback.selector));
+        flashPool.flash(address(executor), 100 * WAD, 0, abi.encode(params));
     }
 
     function test_uniswapV3FlashCallback_revertsForNonPoolCaller() public {

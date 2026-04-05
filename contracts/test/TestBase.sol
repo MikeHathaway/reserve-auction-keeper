@@ -1,10 +1,18 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
+struct Log {
+    bytes32[] topics;
+    bytes data;
+    address emitter;
+}
+
 interface Vm {
     function prank(address caller) external;
     function expectRevert(bytes calldata revertData) external;
     function warp(uint256 newTimestamp) external;
+    function recordLogs() external;
+    function getRecordedLogs() external returns (Log[] memory);
 }
 
 abstract contract TestBase {
