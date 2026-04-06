@@ -10,3 +10,4 @@ cache/
 forge-out/
 broadcast/
 .codex
+*.dot

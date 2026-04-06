@@ -42,6 +42,7 @@ contract FlashArbExecutor is IUniswapV3FlashCallback {
     error UnauthorizedCallback();
     error InvalidAddress();
     error InvalidConfig();
+    error InvalidParams();
     error InvalidFlashPool();
     error InvalidFactoryPool();
     error InvalidBorrowBalance();
@@ -101,6 +102,7 @@ contract FlashArbExecutor is IUniswapV3FlashCallback {
     }
 
     function executeFlashArb(ExecuteParams calldata params) external onlyOwner {
+        _validateParams(params);
         IUniswapV3PoolLike flashPool = IUniswapV3PoolLike(params.flashPool);
 
         address token0 = flashPool.token0();
@@ -202,8 +204,10 @@ contract FlashArbExecutor is IUniswapV3FlashCallback {
     }
 
     function _isCanonicalFactoryPool(address flashPool) internal view returns (bool) {
-        IUniswapV3PoolLike pool = IUniswapV3PoolLike(flashPool);
-        bytes32 salt = keccak256(abi.encode(pool.token0(), pool.token1(), pool.fee()));
+        (bool ok, address token0, address token1, uint24 fee) = _readPoolIdentity(flashPool);
+        if (!ok) return false;
+
+        bytes32 salt = keccak256(abi.encode(token0, token1, fee));
         address expected = address(uint160(uint256(
             keccak256(
                 abi.encodePacked(
@@ -216,5 +220,48 @@ contract FlashArbExecutor is IUniswapV3FlashCallback {
         )));
 
         return expected == flashPool;
+    }
+
+    function _validateParams(ExecuteParams calldata params) internal pure {
+        if (
+            params.flashPool == address(0) ||
+            params.ajnaPool == address(0) ||
+            params.profitRecipient == address(0)
+        ) revert InvalidAddress();
+
+        if (
+            params.borrowAmount == 0 ||
+            params.quoteAmount == 0 ||
+            params.swapPath.length == 0
+        ) revert InvalidParams();
+    }
+
+    function _readPoolIdentity(
+        address flashPool
+    ) internal view returns (bool ok, address token0, address token1, uint24 fee) {
+        if (flashPool.code.length == 0) {
+            return (false, address(0), address(0), 0);
+        }
+
+        IUniswapV3PoolLike pool = IUniswapV3PoolLike(flashPool);
+        try pool.token0() returns (address token0_) {
+            token0 = token0_;
+        } catch {
+            return (false, address(0), address(0), 0);
+        }
+
+        try pool.token1() returns (address token1_) {
+            token1 = token1_;
+        } catch {
+            return (false, address(0), address(0), 0);
+        }
+
+        try pool.fee() returns (uint24 fee_) {
+            fee = fee_;
+        } catch {
+            return (false, address(0), address(0), 0);
+        }
+
+        return (true, token0, token1, fee);
     }
 }

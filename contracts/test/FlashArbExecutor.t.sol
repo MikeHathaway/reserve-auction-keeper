@@ -235,6 +235,86 @@ contract FlashArbExecutorTest is TestBase {
         executor.executeFlashArb(params);
     }
 
+    function test_executeFlashArb_revertsForZeroProfitRecipient() public {
+        FlashArbExecutor.ExecuteParams memory params = FlashArbExecutor.ExecuteParams({
+            flashPool: address(flashPool),
+            ajnaPool: address(ajnaPool),
+            borrowAmount: 1,
+            quoteAmount: 1,
+            swapPath: hex"01",
+            minAjnaOut: 1,
+            profitRecipient: address(0)
+        });
+
+        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutor.InvalidAddress.selector));
+        executor.executeFlashArb(params);
+    }
+
+    function test_executeFlashArb_revertsForZeroBorrowAmount() public {
+        FlashArbExecutor.ExecuteParams memory params = FlashArbExecutor.ExecuteParams({
+            flashPool: address(flashPool),
+            ajnaPool: address(ajnaPool),
+            borrowAmount: 0,
+            quoteAmount: 1,
+            swapPath: hex"01",
+            minAjnaOut: 1,
+            profitRecipient: profitRecipient
+        });
+
+        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutor.InvalidParams.selector));
+        executor.executeFlashArb(params);
+    }
+
+    function test_executeFlashArb_revertsForZeroQuoteAmount() public {
+        FlashArbExecutor.ExecuteParams memory params = FlashArbExecutor.ExecuteParams({
+            flashPool: address(flashPool),
+            ajnaPool: address(ajnaPool),
+            borrowAmount: 1,
+            quoteAmount: 0,
+            swapPath: hex"01",
+            minAjnaOut: 1,
+            profitRecipient: profitRecipient
+        });
+
+        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutor.InvalidParams.selector));
+        executor.executeFlashArb(params);
+    }
+
+    function test_executeFlashArb_revertsForEmptySwapPath() public {
+        FlashArbExecutor.ExecuteParams memory params = FlashArbExecutor.ExecuteParams({
+            flashPool: address(flashPool),
+            ajnaPool: address(ajnaPool),
+            borrowAmount: 1,
+            quoteAmount: 1,
+            swapPath: "",
+            minAjnaOut: 1,
+            profitRecipient: profitRecipient
+        });
+
+        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutor.InvalidParams.selector));
+        executor.executeFlashArb(params);
+    }
+
+    function test_isCanonicalFactoryPool_returnsFalseForEOA() public view {
+        assertTrue(
+            !executor.isCanonicalFactoryPool(address(0x1234)),
+            "non-contract address should not be treated as canonical pool"
+        );
+    }
+
+    function test_isCanonicalFactoryPool_returnsFalseForMalformedContract() public {
+        MockMalformedAjnaPool malformedPool = new MockMalformedAjnaPool(
+            address(quote),
+            QUOTE_TOKEN_SCALE,
+            QUOTE_TOKEN_WAD
+        );
+
+        assertTrue(
+            !executor.isCanonicalFactoryPool(address(malformedPool)),
+            "malformed contract should not be treated as canonical pool"
+        );
+    }
+
     function test_executeFlashArb_revertsForNonIntegralQuoteAmount() public {
         router.setNextAmountOut(105 * WAD);
         MockMalformedAjnaPool malformedPool = new MockMalformedAjnaPool(
