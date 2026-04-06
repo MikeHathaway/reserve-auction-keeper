@@ -88,7 +88,7 @@ FLASHBOTS_AUTH_KEY_FILE=./secrets/flashbots-auth.key
   "flashArb": {
     "maxSlippagePercent": 1,
     "minLiquidityUsd": 100,
-    "minProfitUsd": 0,
+    "minProfitUsd": 5,
     "routes": {
       "base": {
         "quoterAddress": "0x0000000000000000000000000000000000000000",
@@ -206,6 +206,7 @@ Flash-arb borrows AJNA or bwAJNA from a configured Uniswap V3 pool, calls `takeR
 
 - `strategy: "flash-arb"` now uses the on-chain `FlashArbExecutor` contract path
 - `flashArb.maxSlippagePercent`, `flashArb.minLiquidityUsd`, and `flashArb.minProfitUsd` gate candidate selection before execution
+- reserve-auction kicks now use a conservative pre-kick EV estimate; for flash-arb, set `flashArb.minProfitUsd > 0` if you want the keeper to pay gas to start auctions
 - `flashArb.routes.<chain>.quoterAddress` and `quoteToAjnaPaths` provide executable Uniswap V3 quote-token → AJNA routes
 - `flashArb.routes.<chain>.flashLoanPools.<symbol>` selects the Uniswap V3 pool used for the AJNA flash borrow
 - `flashArb.routes.<chain>.executorAddress` or top-level `flashArb.executorAddress` must point at a deployed `FlashArbExecutor`
@@ -224,7 +225,7 @@ Flash-arb borrows AJNA or bwAJNA from a configured Uniswap V3 pool, calls `takeR
 | `funded.autoApprove` | `false` | Auto-approve AJNA spending for pools |
 | `flashArb.maxSlippagePercent` | `1` | Slippage tolerance applied to quoted AJNA output before execution |
 | `flashArb.minLiquidityUsd` | `100` | Minimum quote-token liquidity required before evaluating a flash-arb |
-| `flashArb.minProfitUsd` | `0` | Minimum conservative USD profit after flash fee + slippage floor |
+| `flashArb.minProfitUsd` | `0` | Minimum conservative USD profit after flash fee + slippage floor. Set above `0` to allow flash-arb reserve-auction kicks under the conservative pre-kick EV gate |
 | `flashArb.executorAddress` | unset | Optional default executor address used when a chain route does not override it |
 | `flashArb.routes.<chain>.quoterAddress` | unset | Uniswap V3 quoter used for executable route quotes |
 | `flashArb.routes.<chain>.executorAddress` | unset | Chain-specific deployed `FlashArbExecutor` |
@@ -275,7 +276,7 @@ docker compose -f docker/docker-compose.yml logs keeper | npm run analytics:exec
 src/
   index.ts              — CLI entry point
   config.ts             — Config loading + Zod validation
-  keeper.ts             — Main loop (per-chain, concurrent, error-isolated)
+  keeper.ts             — Main loop (per-chain, concurrent, fail-fast on unexpected loop crashes)
   auction/
     discovery.ts        — Pool auto-discovery via PoolFactory + reserve state
     auction-price.ts    — On-chain auction price from PoolInfoUtils

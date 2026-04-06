@@ -230,19 +230,35 @@ describe("flash-arb strategy", () => {
     expect(result.ajnaCost).toBe(102n);
   });
 
-  it("estimateKickProfit uses the full claimable reserves and route quote as a best-case upper bound", async () => {
-    const { strategy, dexQuoter } = makeStrategy();
+  it("estimateKickProfit uses the configured minimum net profit once the route remains viable", async () => {
+    const { strategy, dexQuoter } = makeStrategy({
+      amountOut: parseEther("130"),
+      minProfitUsd: 2,
+    });
 
     await expect(strategy.estimateKickProfit({
       poolState: makeContext().poolState,
       prices: makeContext().prices,
       chainName: "base",
-    })).resolves.toBeCloseTo(11.88, 6);
+    })).resolves.toBe(2);
     expect(dexQuoter.quoteQuoteToAjna).toHaveBeenCalledWith(
       "USDC",
       parseEther("50"),
       1_000_000_000_000n,
       expect.any(Object),
     );
+  });
+
+  it("estimateKickProfit returns zero when no minimum net profit is configured", async () => {
+    const { strategy } = makeStrategy({
+      amountOut: parseEther("130"),
+      minProfitUsd: 0,
+    });
+
+    await expect(strategy.estimateKickProfit({
+      poolState: makeContext().poolState,
+      prices: makeContext().prices,
+      chainName: "base",
+    })).resolves.toBe(0);
   });
 });

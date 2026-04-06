@@ -113,6 +113,23 @@ export function createFundedStrategy(
     return false;
   }
 
+  function estimateConservativeKickProfitUsd(
+    quoteValueUsd: number,
+    ajnaPriceUsd: number,
+  ): number {
+    const requiredValuePerAjnaUsd = Math.max(
+      config.targetExitPriceUsd,
+      ajnaPriceUsd * (1 + config.profitMarginPercent / 100),
+    );
+
+    if (requiredValuePerAjnaUsd <= 0) {
+      return 0;
+    }
+
+    const futureAjnaCostUsd = quoteValueUsd * ajnaPriceUsd / requiredValuePerAjnaUsd;
+    return Math.max(0, quoteValueUsd - futureAjnaCostUsd);
+  }
+
   function getContextKey(ctx: AuctionContext): string {
     return [
       ctx.chainName,
@@ -398,7 +415,11 @@ export function createFundedStrategy(
       amount = normalizeReserveTakeAmount(amount, ctx.poolState.quoteTokenScale);
       if (amount === 0n) return 0;
 
-      return Number(formatEther(amount)) * ctx.prices.quoteTokenPriceUsd;
+      const quoteValueUsd = Number(formatEther(amount)) * ctx.prices.quoteTokenPriceUsd;
+      return estimateConservativeKickProfitUsd(
+        quoteValueUsd,
+        ctx.prices.ajnaPriceUsd,
+      );
     },
   };
 }

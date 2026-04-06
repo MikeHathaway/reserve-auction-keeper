@@ -422,6 +422,7 @@ export function createFlashArbStrategy(
     async estimateKickProfit(ctx: KickContext): Promise<number> {
       const route = resolveRoute(ctx);
       if (!route || !config.dexQuoter) return 0;
+      if (config.minProfitUsd <= 0) return 0;
 
       const quoteAmount = normalizeReserveTakeAmount(
         ctx.poolState.claimableReserves,
@@ -442,8 +443,7 @@ export function createFlashArbStrategy(
       if (!quote) return 0;
       if (quote.slippagePercent > config.maxSlippagePercent) return 0;
 
-      const minAjnaOut = applySlippageFloor(quote.amountOut);
-      return Number(formatEther(minAjnaOut)) * ctx.prices.ajnaPriceUsd;
+      return config.minProfitUsd;
     },
   };
 }

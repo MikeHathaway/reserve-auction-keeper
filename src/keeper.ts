@@ -35,6 +35,7 @@ import { logger } from "./utils/logger.js";
 let shutdownRequested = false;
 
 export function requestShutdown() {
+  if (shutdownRequested) return;
   shutdownRequested = true;
   logger.info("Shutdown requested, finishing current cycle...");
 }
@@ -403,14 +404,14 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
           prices,
           chainName,
         };
-        const kickProfitUpperBoundUsd = await strategy.estimateKickProfit(kickCtx);
+        const estimatedKickProfitUsd = await strategy.estimateKickProfit(kickCtx);
         const totalExpectedCostUsd = sumEstimatedCostsUsd(
           kickGasCheck.estimatedCostUsd,
           executionGasCheck.estimatedCostUsd,
         );
         if (
           !isProfitableAfterCosts(
-            kickProfitUpperBoundUsd,
+            estimatedKickProfitUsd,
             totalExpectedCostUsd,
             config.profitMarginPercent,
           )
@@ -422,7 +423,7 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
             claimableReservesUsd: claimableValueUsd.toFixed(6),
             kickGasCostUsd: kickGasCheck.estimatedCostUsd.toFixed(6),
             futureExecutionGasCostUsd: executionGasCheck.estimatedCostUsd.toFixed(6),
-            estimatedKickProfitUpperBoundUsd: kickProfitUpperBoundUsd.toFixed(6),
+            estimatedKickProfitUsd: estimatedKickProfitUsd.toFixed(6),
           });
           continue;
         }
@@ -514,6 +515,7 @@ export function sleep(
 }
 
 export async function startKeeper(config: AppConfig): Promise<void> {
+  shutdownRequested = false;
   logger.info("Starting Ajna Reserve Auction Keeper", {
     strategy: config.strategy,
     chains: config.chains.map((c) => c.chainConfig.name),
@@ -529,6 +531,8 @@ export async function startKeeper(config: AppConfig): Promise<void> {
         chain: keeper.chainConfig.chainConfig.name,
         error: error instanceof Error ? error.message : String(error),
       });
+      requestShutdown();
+      throw error;
     }),
   );
 

@@ -43,8 +43,8 @@ export interface ExecutionStrategy {
   estimateProfit(ctx: AuctionContext): Promise<number>;
 
   /**
-   * Estimate the strategy's best-case future profit in USD if this pool is kicked now,
-   * excluding the kick transaction gas itself.
+   * Estimate a conservative future trade profit in USD if this pool is kicked now,
+   * before any gas costs are applied.
    */
   estimateKickProfit(ctx: KickContext): Promise<number>;
 }
