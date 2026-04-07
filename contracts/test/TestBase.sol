@@ -9,6 +9,7 @@ struct Log {
 
 interface Vm {
     function prank(address caller) external;
+    function expectRevert() external;
     function expectRevert(bytes calldata revertData) external;
     function warp(uint256 newTimestamp) external;
     function recordLogs() external;

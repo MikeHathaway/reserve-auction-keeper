@@ -4,7 +4,7 @@ An open source bot that monitors and participates in [Ajna Protocol](https://www
 
 Reserve auctions are the mechanism by which Ajna "buys back and burns" its native token using surplus quote tokens (interest) earned by pools. This bot automates participation in these Dutch auctions, executing trades when prices become favorable.
 
-Current status: funded strategy supports live execution. Mainnet uses a single-tx Flashbots bundle path, Base uses private RPC submission, and flash-arb now has an executor-backed dry-run/live path when a deployed executor and per-chain routes are configured. Fork-tested end-to-end execution is still outstanding.
+Current status: funded strategy supports live execution. Mainnet uses a single-tx Flashbots bundle path, Base uses private RPC submission, and flash-arb now has an executor-backed dry-run/live path when a deployed executor and per-chain routes are configured. The Solidity fork suite now also locks in the current mainnet flash-arb topology constraint: the pinned USDC reserve-auction path can be quoted live, but it still reuses the locked AJNA/WETH flash pool on Uniswap V3, so a successful mainnet V3-only flash-arb route still depends on future liquidity topology.
 
 ## How It Works
 
@@ -127,7 +127,7 @@ npm run analytics:executions -- ./keeper.log
 # Solidity executor tests
 npm run test:contracts
 
-# Mainnet fork smoke test for canonical Uniswap V3 pool verification
+# Mainnet fork tests for canonical pool verification and live flash-arb topology regression
 npm run test:contracts:fork:mainnet
 ```
 

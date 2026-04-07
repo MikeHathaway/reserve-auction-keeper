@@ -40,6 +40,7 @@ interface ISwapRouterLike {
 contract FlashArbExecutor is IUniswapV3FlashCallback {
     error Unauthorized();
     error UnauthorizedCallback();
+    error ActiveFlashExecution();
     error InvalidAddress();
     error InvalidConfig();
     error InvalidParams();
@@ -68,6 +69,7 @@ contract FlashArbExecutor is IUniswapV3FlashCallback {
 
     address private activeFlashPool;
     bytes32 private activeCallbackHash;
+    bool private flashExecutionActive;
 
     event FlashArbExecuted(
         address indexed flashPool,
@@ -77,6 +79,7 @@ contract FlashArbExecutor is IUniswapV3FlashCallback {
         uint256 repaidAjna,
         uint256 profitAjna
     );
+    event TokenRecovered(address indexed token, address indexed to, uint256 amount);
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert Unauthorized();
@@ -119,9 +122,11 @@ contract FlashArbExecutor is IUniswapV3FlashCallback {
 
         activeFlashPool = params.flashPool;
         activeCallbackHash = keccak256(abi.encode(params));
+        flashExecutionActive = true;
         flashPool.flash(address(this), amount0, amount1, abi.encode(params));
         activeFlashPool = address(0);
         activeCallbackHash = bytes32(0);
+        flashExecutionActive = false;
     }
 
     function uniswapV3FlashCallback(
@@ -189,6 +194,14 @@ contract FlashArbExecutor is IUniswapV3FlashCallback {
         );
     }
 
+    function recoverToken(address token, address to, uint256 amount) external onlyOwner {
+        if (_isFlashActive()) revert ActiveFlashExecution();
+        if (token == address(0) || to == address(0)) revert InvalidAddress();
+
+        _transferToken(token, to, amount);
+        emit TokenRecovered(token, to, amount);
+    }
+
     function _approveExact(address token, address spender, uint256 amount) internal {
         if (!IERC20Like(token).approve(spender, 0)) revert InvalidAddress();
         if (!IERC20Like(token).approve(spender, amount)) revert InvalidAddress();
@@ -233,6 +246,10 @@ contract FlashArbExecutor is IUniswapV3FlashCallback {
             params.quoteAmount == 0 ||
             params.swapPath.length == 0
         ) revert InvalidParams();
+    }
+
+    function _isFlashActive() internal view returns (bool) {
+        return flashExecutionActive;
     }
 
     function _readPoolIdentity(

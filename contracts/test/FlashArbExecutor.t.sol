@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-import {FlashArbExecutor} from "../FlashArbExecutor.sol";
+import {FlashArbExecutor, IERC20Like, ISwapRouterLike} from "../FlashArbExecutor.sol";
 import {Log, TestBase} from "./TestBase.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockAjnaPool} from "./mocks/MockAjnaPool.sol";
@@ -9,6 +9,98 @@ import {MockMalformedAjnaPool} from "./mocks/MockMalformedAjnaPool.sol";
 import {MockSwapRouter} from "./mocks/MockSwapRouter.sol";
 import {MockUniswapV3Factory} from "./mocks/MockUniswapV3Factory.sol";
 import {MockUniswapV3Pool} from "./mocks/MockUniswapV3Pool.sol";
+
+contract OwnerProxy {
+    function deployExecutor(
+        address ajnaToken,
+        address swapRouter,
+        address uniswapV3Factory,
+        bytes32 initCodeHash
+    ) external returns (FlashArbExecutor) {
+        return new FlashArbExecutor(ajnaToken, swapRouter, uniswapV3Factory, initCodeHash);
+    }
+
+    function executeFlashArb(
+        FlashArbExecutor executor,
+        FlashArbExecutor.ExecuteParams memory params
+    ) external {
+        executor.executeFlashArb(params);
+    }
+
+    function attemptRecoverToken(
+        FlashArbExecutor executor,
+        address token,
+        address to,
+        uint256 amount
+    ) external returns (bool) {
+        try executor.recoverToken(token, to, amount) {
+            return true;
+        } catch {
+            return false;
+        }
+    }
+}
+
+contract ReenteringRecoverRouter is ISwapRouterLike {
+    address public immutable quoteToken;
+    address public immutable ajnaToken;
+    OwnerProxy public immutable ownerProxy;
+    FlashArbExecutor public executor;
+
+    address public recoveryToken;
+    address public recoveryRecipient;
+    uint256 public recoveryAmount;
+    uint256 public nextAmountOut;
+    bool public recoveryAttempted;
+    bool public recoverySucceeded;
+
+    constructor(
+        address quoteToken_,
+        address ajnaToken_,
+        OwnerProxy ownerProxy_
+    ) {
+        quoteToken = quoteToken_;
+        ajnaToken = ajnaToken_;
+        ownerProxy = ownerProxy_;
+    }
+
+    function setExecutor(FlashArbExecutor executor_) external {
+        executor = executor_;
+    }
+
+    function setNextAmountOut(uint256 amountOut) external {
+        nextAmountOut = amountOut;
+    }
+
+    function setRecovery(address token, address recipient, uint256 amount) external {
+        recoveryToken = token;
+        recoveryRecipient = recipient;
+        recoveryAmount = amount;
+    }
+
+    function exactInput(ExactInputParams calldata params) external payable returns (uint256 amountOut) {
+        require(
+            IERC20Like(quoteToken).transferFrom(msg.sender, address(this), params.amountIn),
+            "QUOTE_IN"
+        );
+
+        recoveryAttempted = true;
+        recoverySucceeded = ownerProxy.attemptRecoverToken(
+            executor,
+            recoveryToken,
+            recoveryRecipient,
+            recoveryAmount
+        );
+
+        require(nextAmountOut >= params.amountOutMinimum, "MIN_OUT");
+        require(
+            IERC20Like(ajnaToken).transfer(params.recipient, nextAmountOut),
+            "AJNA_OUT"
+        );
+
+        return nextAmountOut;
+    }
+}
 
 contract FlashArbExecutorTest is TestBase {
     uint256 internal constant WAD = 1e18;
@@ -314,6 +406,77 @@ contract FlashArbExecutorTest is TestBase {
 
         vm.expectRevert(abi.encodeWithSelector(FlashArbExecutor.InvalidParams.selector));
         executor.executeFlashArb(params);
+    }
+
+    function test_recoverToken_transfersStrandedTokens() public {
+        MockERC20 stranded = new MockERC20("Stranded", "STR");
+        stranded.mint(address(executor), 123);
+
+        executor.recoverToken(address(stranded), profitRecipient, 123);
+
+        assertEq(stranded.balanceOf(address(executor)), 0, "executor should not retain stranded tokens");
+        assertEq(stranded.balanceOf(profitRecipient), 123, "recipient should receive recovered tokens");
+    }
+
+    function test_recoverToken_onlyOwner() public {
+        MockERC20 stranded = new MockERC20("Stranded", "STR");
+        stranded.mint(address(executor), 123);
+
+        vm.prank(address(0xCAFE));
+        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutor.Unauthorized.selector));
+        executor.recoverToken(address(stranded), profitRecipient, 123);
+    }
+
+    function test_recoverToken_revertsDuringActiveFlashExecution() public {
+        MockERC20 localAjna = new MockERC20("Ajna", "AJNA");
+        MockERC20 localQuote = new MockERC20("Quote", "QUOTE");
+        MockERC20 stranded = new MockERC20("Stranded", "STR");
+        MockUniswapV3Factory localFactory = new MockUniswapV3Factory();
+        OwnerProxy ownerProxy = new OwnerProxy();
+
+        ReenteringRecoverRouter reenteringRouter = new ReenteringRecoverRouter(
+            address(localQuote),
+            address(localAjna),
+            ownerProxy
+        );
+
+        FlashArbExecutor proxyOwnedExecutor = ownerProxy.deployExecutor(
+            address(localAjna),
+            address(reenteringRouter),
+            address(localFactory),
+            keccak256(type(MockUniswapV3Pool).creationCode)
+        );
+        reenteringRouter.setExecutor(proxyOwnedExecutor);
+
+        MockAjnaPool localAjnaPool = new MockAjnaPool(address(localAjna), address(localQuote), QUOTE_TOKEN_SCALE, 2 * WAD);
+        MockUniswapV3Pool localFlashPool = MockUniswapV3Pool(
+            localFactory.createPool(address(localAjna), address(localQuote), POOL_FEE, 1 * WAD, 0)
+        );
+
+        localAjna.mint(address(localFlashPool), 200 * WAD);
+        localQuote.mint(address(localAjnaPool), QUOTE_TOKEN_RAW);
+        localAjna.mint(address(reenteringRouter), 105 * WAD);
+        stranded.mint(address(proxyOwnedExecutor), 9);
+
+        reenteringRouter.setNextAmountOut(105 * WAD);
+        reenteringRouter.setRecovery(address(stranded), profitRecipient, 9);
+
+        FlashArbExecutor.ExecuteParams memory params = FlashArbExecutor.ExecuteParams({
+            flashPool: address(localFlashPool),
+            ajnaPool: address(localAjnaPool),
+            borrowAmount: 100 * WAD,
+            quoteAmount: QUOTE_TOKEN_WAD,
+            swapPath: hex"010203",
+            minAjnaOut: 104 * WAD,
+            profitRecipient: profitRecipient
+        });
+
+        ownerProxy.executeFlashArb(proxyOwnedExecutor, params);
+
+        assertTrue(reenteringRouter.recoveryAttempted(), "router should try recovery during callback");
+        assertTrue(!reenteringRouter.recoverySucceeded(), "recovery should fail while flash execution is active");
+        assertEq(stranded.balanceOf(address(proxyOwnedExecutor)), 9, "executor should retain stranded tokens");
+        assertEq(stranded.balanceOf(profitRecipient), 0, "recipient should not receive stranded tokens");
     }
 
     function test_isCanonicalFactoryPool_returnsFalseForEOA() public view {
