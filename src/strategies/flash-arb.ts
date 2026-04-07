@@ -419,6 +419,10 @@ export function createFlashArbStrategy(
       return candidate?.estimatedProfitUsd ?? 0;
     },
 
+    async estimateAdditionalExecutionGasUnits(): Promise<bigint> {
+      return 0n;
+    },
+
     async estimateKickProfit(ctx: KickContext): Promise<number> {
       const route = resolveRoute(ctx);
       if (!route || !config.dexQuoter) return 0;
@@ -453,6 +457,10 @@ export function createFlashArbStrategy(
       if (maxBorrowAjna <= 0) return 0;
 
       return config.minProfitUsd;
+    },
+
+    async estimateAdditionalKickExecutionGasUnits(): Promise<bigint> {
+      return 0n;
     },
   };
 }

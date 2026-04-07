@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { parseEther } from "viem";
 import type * as ViemModule from "viem";
 import type * as AccountsModule from "viem/accounts";
 import type { AppConfig } from "../../src/config.js";
@@ -67,6 +68,8 @@ const {
       execute: vi.fn(),
       estimateProfit: vi.fn(),
       estimateKickProfit: vi.fn(),
+      estimateAdditionalExecutionGasUnits: vi.fn(),
+      estimateAdditionalKickExecutionGasUnits: vi.fn(),
     },
     mockCreateFundedStrategy: vi.fn(),
     mockCreateFlashArbStrategy: vi.fn(),
@@ -254,6 +257,8 @@ describe("keeper lifecycle", () => {
     mockFundedStrategy.execute.mockResolvedValue(undefined);
     mockFundedStrategy.estimateProfit.mockResolvedValue(0);
     mockFundedStrategy.estimateKickProfit.mockResolvedValue(0);
+    mockFundedStrategy.estimateAdditionalExecutionGasUnits.mockResolvedValue(0n);
+    mockFundedStrategy.estimateAdditionalKickExecutionGasUnits.mockResolvedValue(0n);
     mockCreateAlchemyPricesClient.mockReturnValue({
       getPrices: vi.fn().mockResolvedValue(new Map()),
       isPriceStale: vi.fn(() => false),
@@ -306,6 +311,112 @@ describe("keeper lifecycle", () => {
       }),
     );
     expect(mockLogger.alert).not.toHaveBeenCalled();
+  });
+
+  it("accounts for additional strategy execution gas before funded takes", async () => {
+    const activePoolState = {
+      pool: "0x6666666666666666666666666666666666666666",
+      quoteToken: "0x5555555555555555555555555555555555555555",
+      quoteTokenScale: 1_000_000_000_000n,
+      quoteTokenSymbol: "USDC",
+      reserves: 0n,
+      claimableReserves: 0n,
+      claimableReservesRemaining: parseEther("1"),
+      auctionPrice: parseEther("2"),
+      timeRemaining: 3600n,
+      hasActiveAuction: true,
+      isKickable: false,
+    };
+    mockDiscoverPools.mockResolvedValue([activePoolState.pool]);
+    mockGetPoolReserveStates
+      .mockResolvedValueOnce([activePoolState])
+      .mockImplementationOnce(async () => {
+        requestShutdown();
+        return [];
+      });
+    mockGetAuctionPrices.mockResolvedValue(new Map([
+      [activePoolState.pool, {
+        pool: activePoolState.pool,
+        auctionPrice: parseEther("2"),
+        auctionPriceFormatted: "2.0",
+        timeRemaining: 3600n,
+        timeRemainingHours: 1,
+      }],
+    ]));
+    mockGetPricesForQuoteTokens.mockResolvedValue(new Map([
+      ["USDC", {
+        ajnaPriceUsd: 0.2,
+        quoteTokenPriceUsd: 1,
+        source: "coingecko",
+        isStale: false,
+      }],
+    ]));
+    mockFundedStrategy.estimateProfit.mockResolvedValue(0.012);
+    mockFundedStrategy.canExecute.mockResolvedValue(true);
+    mockFundedStrategy.estimateAdditionalExecutionGasUnits.mockResolvedValue(60_000n);
+    mockEvaluateGasCost.mockImplementation((
+      _gasPrice: bigint,
+      _ceilingGwei: number,
+      estimatedGasUnits: bigint,
+    ) => ({
+      currentGasPriceGwei: 1,
+      isAboveCeiling: false,
+      estimatedCostUsd: Number(estimatedGasUnits) / 200_000 * 0.01,
+    }));
+
+    await startKeeper({ ...makeConfig(), dryRun: false });
+
+    expect(mockEvaluateGasCost).toHaveBeenCalledWith(1n, 100, 260_000n, 2000);
+    expect(mockFundedStrategy.execute).not.toHaveBeenCalled();
+  });
+
+  it("accounts for additional strategy follow-up gas before kicking reserve auctions", async () => {
+    const kickablePoolState = {
+      pool: "0x7777777777777777777777777777777777777777",
+      quoteToken: "0x5555555555555555555555555555555555555555",
+      quoteTokenScale: 1_000_000_000_000n,
+      quoteTokenSymbol: "USDC",
+      reserves: 0n,
+      claimableReserves: parseEther("1"),
+      claimableReservesRemaining: 0n,
+      auctionPrice: 0n,
+      timeRemaining: 0n,
+      hasActiveAuction: false,
+      isKickable: true,
+    };
+    mockDiscoverPools.mockResolvedValue([kickablePoolState.pool]);
+    mockGetPoolReserveStates
+      .mockResolvedValueOnce([kickablePoolState])
+      .mockImplementationOnce(async () => {
+        requestShutdown();
+        return [];
+      });
+    mockGetPricesForQuoteTokens.mockResolvedValue(new Map([
+      ["USDC", {
+        ajnaPriceUsd: 0.2,
+        quoteTokenPriceUsd: 1,
+        source: "coingecko",
+        isStale: false,
+      }],
+    ]));
+    mockCanKickReserveAuction.mockResolvedValue(true);
+    mockEstimateKickClaimableValueUsd.mockReturnValue(1);
+    mockFundedStrategy.estimateKickProfit.mockResolvedValue(0.0195);
+    mockFundedStrategy.estimateAdditionalKickExecutionGasUnits.mockResolvedValue(60_000n);
+    mockEvaluateGasCost.mockImplementation((
+      _gasPrice: bigint,
+      _ceilingGwei: number,
+      estimatedGasUnits: bigint,
+    ) => ({
+      currentGasPriceGwei: 1,
+      isAboveCeiling: false,
+      estimatedCostUsd: Number(estimatedGasUnits) / 200_000 * 0.01,
+    }));
+
+    await startKeeper({ ...makeConfig(), dryRun: false });
+
+    expect(mockEvaluateGasCost).toHaveBeenCalledWith(1n, 100, 260_000n, 2000);
+    expect(mockKickReserveAuction).not.toHaveBeenCalled();
   });
 
   it("resets stale shutdown state before starting loops", async () => {

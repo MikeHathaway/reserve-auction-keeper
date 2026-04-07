@@ -286,27 +286,17 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
       const priceCache = quoteTokenSymbols.length > 0
         ? await oracle.getPricesForQuoteTokens(quoteTokenSymbols)
         : new Map<string, Awaited<ReturnType<typeof oracle.getPrices>>>();
-      const gasPricePromise = activeAuctions.length > 0 || kickable.length > 0
-        ? publicClient.getGasPrice()
+      const gasPrice = activeAuctions.length > 0 || kickable.length > 0
+        ? await publicClient.getGasPrice()
         : null;
-      const executionGasCheckPromise = gasPricePromise
-        ? gasPricePromise.then((gasPrice) =>
-            evaluateGasCost(
-              gasPrice,
-              config.gasPriceCeilingGwei,
-              EXECUTION_GAS_UNITS,
-              chainConfig.chainConfig.nativeTokenPriceUsd,
-            ))
-        : null;
-      const kickGasCheckPromise = gasPricePromise
-        ? gasPricePromise.then((gasPrice) =>
-            evaluateGasCost(
-              gasPrice,
-              config.gasPriceCeilingGwei,
-              KICK_RESERVE_AUCTION_GAS_UNITS,
-              chainConfig.chainConfig.nativeTokenPriceUsd,
-            ))
-        : null;
+      const kickGasCheck = gasPrice == null
+        ? null
+        : evaluateGasCost(
+            gasPrice,
+            config.gasPriceCeilingGwei,
+            KICK_RESERVE_AUCTION_GAS_UNITS,
+            chainConfig.chainConfig.nativeTokenPriceUsd,
+          );
 
       // 4. Evaluate and execute on each active auction
       let anyNearProfitable = false;
@@ -334,7 +324,14 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
         };
 
         const profit = await strategy.estimateProfit(ctx);
-        const executionGasCheck = await executionGasCheckPromise!;
+        const additionalExecutionGasUnits =
+          await strategy.estimateAdditionalExecutionGasUnits?.(ctx) ?? 0n;
+        const executionGasCheck = evaluateGasCost(
+          gasPrice!,
+          config.gasPriceCeilingGwei,
+          EXECUTION_GAS_UNITS + additionalExecutionGasUnits,
+          chainConfig.chainConfig.nativeTokenPriceUsd,
+        );
 
         if (
           isNearProfitableAfterCosts(
@@ -421,23 +418,30 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
           continue;
         }
 
-        const kickGasCheck = await kickGasCheckPromise!;
-        const executionGasCheck = await executionGasCheckPromise!;
-        if (kickGasCheck.isAboveCeiling) continue;
+        const kickCtx = {
+          poolState,
+          prices,
+          chainName,
+        };
+        const additionalKickExecutionGasUnits =
+          await strategy.estimateAdditionalKickExecutionGasUnits?.(kickCtx) ?? 0n;
+        const executionGasCheck = evaluateGasCost(
+          gasPrice!,
+          config.gasPriceCeilingGwei,
+          EXECUTION_GAS_UNITS + additionalKickExecutionGasUnits,
+          chainConfig.chainConfig.nativeTokenPriceUsd,
+        );
+        const kickGasCheckResolved = kickGasCheck!;
+        if (kickGasCheckResolved.isAboveCeiling) continue;
         if (executionGasCheck.isAboveCeiling) continue;
 
         const claimableValueUsd = estimateKickClaimableValueUsd(
           poolState.claimableReserves,
           prices.quoteTokenPriceUsd,
         );
-        const kickCtx = {
-          poolState,
-          prices,
-          chainName,
-        };
         const estimatedKickProfitUsd = await strategy.estimateKickProfit(kickCtx);
         const totalExpectedCostUsd = sumEstimatedCostsUsd(
-          kickGasCheck.estimatedCostUsd,
+          kickGasCheckResolved.estimatedCostUsd,
           executionGasCheck.estimatedCostUsd,
         );
         if (
@@ -452,7 +456,7 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
             pool: poolState.pool,
             quoteTokenSymbol: poolState.quoteTokenSymbol,
             claimableReservesUsd: claimableValueUsd.toFixed(6),
-            kickGasCostUsd: kickGasCheck.estimatedCostUsd.toFixed(6),
+            kickGasCostUsd: kickGasCheckResolved.estimatedCostUsd.toFixed(6),
             futureExecutionGasCostUsd: executionGasCheck.estimatedCostUsd.toFixed(6),
             estimatedKickProfitUsd: estimatedKickProfitUsd.toFixed(6),
           });

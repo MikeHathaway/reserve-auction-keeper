@@ -38,6 +38,13 @@ interface FundedExecutionPlan {
   profitUsd: number;
 }
 
+interface KickExecutionEstimate {
+  executableQuoteValueUsd: number;
+  futureAjnaCostAjna: number;
+}
+
+const APPROVAL_GAS_UNITS = 60_000n;
+
 const ERC20_ABI = [
   {
     inputs: [{ name: "owner", type: "address" }, { name: "spender", type: "address" }],
@@ -132,6 +139,57 @@ export function createFundedStrategy(
       config.targetExitPriceUsd,
       ajnaPriceUsd * (1 + config.profitMarginPercent / 100),
     );
+  }
+
+  async function estimateAdditionalApprovalGasUnits(
+    pool: Address,
+    requiredAjnaCost: bigint,
+  ): Promise<bigint> {
+    if (!config.autoApprove || config.dryRun) {
+      return 0n;
+    }
+
+    const allowance = await getAllowance(pool);
+    return allowance < requiredAjnaCost ? APPROVAL_GAS_UNITS : 0n;
+  }
+
+  async function getKickExecutionEstimate(
+    ctx: KickContext,
+  ): Promise<KickExecutionEstimate | null> {
+    const balance = await getAjnaBalance();
+    if (balance === 0n) return null;
+
+    let amount = ctx.poolState.claimableReserves;
+    if (config.maxTakeAmount && amount > config.maxTakeAmount) {
+      amount = config.maxTakeAmount;
+    }
+    amount = normalizeReserveTakeAmount(amount, ctx.poolState.quoteTokenScale);
+    if (amount === 0n) return null;
+
+    const requiredValuePerAjnaUsd = getRequiredValuePerAjnaUsd(ctx.prices.ajnaPriceUsd);
+    if (requiredValuePerAjnaUsd <= 0 || ctx.prices.quoteTokenPriceUsd <= 0) {
+      return null;
+    }
+
+    const quoteValueUsd = Number(formatEther(amount)) * ctx.prices.quoteTokenPriceUsd;
+    const walletTakeCapacityUsd =
+      Number(formatEther(balance)) * requiredValuePerAjnaUsd;
+    let executableQuoteValueUsd = Math.min(quoteValueUsd, walletTakeCapacityUsd);
+    if (!config.autoApprove || config.dryRun) {
+      const allowance = await getAllowance(ctx.poolState.pool);
+      const allowanceTakeCapacityUsd =
+        Number(formatEther(allowance)) * requiredValuePerAjnaUsd;
+      executableQuoteValueUsd = Math.min(
+        executableQuoteValueUsd,
+        allowanceTakeCapacityUsd,
+      );
+    }
+    if (executableQuoteValueUsd <= 0) return null;
+
+    return {
+      executableQuoteValueUsd,
+      futureAjnaCostAjna: executableQuoteValueUsd / requiredValuePerAjnaUsd,
+    };
   }
 
   function getContextKey(ctx: AuctionContext): string {
@@ -408,41 +466,37 @@ export function createFundedStrategy(
       return plan?.profitUsd ?? 0;
     },
 
+    async estimateAdditionalExecutionGasUnits(ctx: AuctionContext): Promise<bigint> {
+      const plan = await getExecutionPlan(ctx);
+      if (!plan) return 0n;
+
+      return estimateAdditionalApprovalGasUnits(ctx.poolState.pool, plan.ajnaCost);
+    },
+
     async estimateKickProfit(ctx: KickContext): Promise<number> {
-      const balance = await getAjnaBalance();
-      if (balance === 0n) return 0;
-
-      let amount = ctx.poolState.claimableReserves;
-      if (config.maxTakeAmount && amount > config.maxTakeAmount) {
-        amount = config.maxTakeAmount;
-      }
-      amount = normalizeReserveTakeAmount(amount, ctx.poolState.quoteTokenScale);
-      if (amount === 0n) return 0;
-
-      const requiredValuePerAjnaUsd = getRequiredValuePerAjnaUsd(ctx.prices.ajnaPriceUsd);
-      if (requiredValuePerAjnaUsd <= 0 || ctx.prices.quoteTokenPriceUsd <= 0) {
-        return 0;
-      }
-
-      const quoteValueUsd = Number(formatEther(amount)) * ctx.prices.quoteTokenPriceUsd;
-      const walletTakeCapacityUsd =
-        Number(formatEther(balance)) * requiredValuePerAjnaUsd;
-      let executableQuoteValueUsd = Math.min(quoteValueUsd, walletTakeCapacityUsd);
-      if (!config.autoApprove || config.dryRun) {
-        const allowance = await getAllowance(ctx.poolState.pool);
-        const allowanceTakeCapacityUsd =
-          Number(formatEther(allowance)) * requiredValuePerAjnaUsd;
-        executableQuoteValueUsd = Math.min(
-          executableQuoteValueUsd,
-          allowanceTakeCapacityUsd,
-        );
-      }
-      if (executableQuoteValueUsd <= 0) return 0;
+      const estimate = await getKickExecutionEstimate(ctx);
+      if (!estimate) return 0;
 
       return estimateConservativeKickProfitUsd(
-        executableQuoteValueUsd,
+        estimate.executableQuoteValueUsd,
         ctx.prices.ajnaPriceUsd,
       );
+    },
+
+    async estimateAdditionalKickExecutionGasUnits(ctx: KickContext): Promise<bigint> {
+      if (!config.autoApprove || config.dryRun) {
+        return 0n;
+      }
+
+      const estimate = await getKickExecutionEstimate(ctx);
+      if (!estimate || estimate.futureAjnaCostAjna <= 0) {
+        return 0n;
+      }
+
+      const allowanceAjna = Number(formatEther(await getAllowance(ctx.poolState.pool)));
+      return allowanceAjna + Number.EPSILON < estimate.futureAjnaCostAjna
+        ? APPROVAL_GAS_UNITS
+        : 0n;
     },
   };
 }

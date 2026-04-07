@@ -581,6 +581,72 @@ describe("funded strategy", () => {
     expect(publicClient.readContract).toHaveBeenCalledTimes(1);
   });
 
+  it("estimateAdditionalExecutionGasUnits adds approval gas when live auto-approve needs allowance", async () => {
+    const publicClient = {
+      chain: BASE_CONFIG.chain,
+      readContract: vi.fn()
+        .mockResolvedValueOnce(parseEther("100"))
+        .mockResolvedValueOnce(0n),
+    };
+    const walletClient = {
+      account: { address: WALLET_ADDRESS },
+    };
+
+    const strategy = createFundedStrategy(
+      publicClient as never,
+      walletClient as never,
+      BASE_CONFIG.ajnaToken,
+      makeSubmitter(),
+      {
+        targetExitPriceUsd: 0.1,
+        autoApprove: true,
+        profitMarginPercent: 5,
+        dryRun: false,
+        nativeTokenPriceUsd: BASE_CONFIG.nativeTokenPriceUsd,
+      },
+    );
+
+    await expect(
+      strategy.estimateAdditionalExecutionGasUnits?.(makeContext()),
+    ).resolves.toBe(60_000n);
+  });
+
+  it("estimateAdditionalKickExecutionGasUnits adds approval gas when live auto-approve would need future allowance", async () => {
+    const publicClient = {
+      chain: BASE_CONFIG.chain,
+      readContract: vi.fn()
+        .mockResolvedValueOnce(parseEther("1"))
+        .mockResolvedValueOnce(0n),
+    };
+    const walletClient = {
+      account: { address: WALLET_ADDRESS },
+    };
+
+    const strategy = createFundedStrategy(
+      publicClient as never,
+      walletClient as never,
+      BASE_CONFIG.ajnaToken,
+      makeSubmitter(),
+      {
+        targetExitPriceUsd: 0.1,
+        maxTakeAmount: parseEther("3"),
+        autoApprove: true,
+        profitMarginPercent: 5,
+        dryRun: false,
+        nativeTokenPriceUsd: BASE_CONFIG.nativeTokenPriceUsd,
+      },
+    );
+
+    await expect(strategy.estimateAdditionalKickExecutionGasUnits?.({
+      poolState: {
+        ...makeContext().poolState,
+        claimableReserves: parseEther("10"),
+      },
+      prices: makeContext().prices,
+      chainName: "base",
+    })).resolves.toBe(60_000n);
+  });
+
   it("estimateKickProfit is capped by the wallet's future funded buying power", async () => {
     const publicClient = {
       chain: BASE_CONFIG.chain,

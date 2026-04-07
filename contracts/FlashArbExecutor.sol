@@ -103,10 +103,9 @@ contract FlashArbExecutor is IUniswapV3FlashCallback {
 
     function executeFlashArb(ExecuteParams calldata params) external onlyOwner {
         _validateParams(params);
+        (bool ok, address token0, address token1, ) = _readPoolIdentity(params.flashPool);
+        if (!ok) revert InvalidFlashPool();
         IUniswapV3PoolLike flashPool = IUniswapV3PoolLike(params.flashPool);
-
-        address token0 = flashPool.token0();
-        address token1 = flashPool.token1();
 
         uint256 amount0;
         uint256 amount1;

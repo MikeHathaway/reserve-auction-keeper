@@ -47,4 +47,16 @@ export interface ExecutionStrategy {
    * before any gas costs are applied.
    */
   estimateKickProfit(ctx: KickContext): Promise<number>;
+
+  /**
+   * Estimate any strategy-specific execution gas on top of the keeper's shared
+   * transaction baseline for an active auction.
+   */
+  estimateAdditionalExecutionGasUnits?(ctx: AuctionContext): Promise<bigint>;
+
+  /**
+   * Estimate any strategy-specific future execution gas on top of the keeper's
+   * shared transaction baseline if a reserve auction is kicked now.
+   */
+  estimateAdditionalKickExecutionGasUnits?(ctx: KickContext): Promise<bigint>;
 }

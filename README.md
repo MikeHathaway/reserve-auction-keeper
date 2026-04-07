@@ -107,7 +107,7 @@ FLASHBOTS_AUTH_KEY_FILE=./secrets/flashbots-auth.key
 }
 ```
 
-`chains.<chain>.quoteTokens` is additive by default. It merges with the chain's built-in quote-token whitelist and can override an existing symbol by reusing the same key.
+`chains.<chain>.quoteTokens` is additive by default. It merges with the chain's built-in quote-token whitelist and can override an existing symbol by reusing the same key. If you point an existing symbol at a different token address in `coingecko` or `hybrid` mode, also provide a new `coingeckoId`.
 
 ### Run
 

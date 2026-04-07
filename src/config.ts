@@ -168,11 +168,18 @@ function mergeChainConfig(
 
   for (const [rawSymbol, override] of Object.entries(chainFileConfig.quoteTokens)) {
     const symbol = normalizeSymbol(rawSymbol);
+    const previousAddress = mergedQuoteTokens[symbol]?.toLowerCase();
+    const nextAddress = override.address.toLowerCase();
+    const isAddressOverride = previousAddress !== undefined && previousAddress !== nextAddress;
     mergedQuoteTokens[symbol] = override.address as Address;
 
     if (override.coingeckoId) {
       mergedCoingeckoIds[symbol] = override.coingeckoId;
       continue;
+    }
+
+    if (isAddressOverride) {
+      delete mergedCoingeckoIds[symbol];
     }
 
     if (!mergedCoingeckoIds[symbol] && requiresCoingeckoPricing(priceProvider)) {

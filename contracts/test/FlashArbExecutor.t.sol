@@ -219,6 +219,27 @@ contract FlashArbExecutorTest is TestBase {
         executor.executeFlashArb(params);
     }
 
+    function test_executeFlashArb_revertsForMalformedFlashPool() public {
+        MockMalformedAjnaPool malformedPool = new MockMalformedAjnaPool(
+            address(quote),
+            QUOTE_TOKEN_SCALE,
+            QUOTE_TOKEN_WAD
+        );
+
+        FlashArbExecutor.ExecuteParams memory params = FlashArbExecutor.ExecuteParams({
+            flashPool: address(malformedPool),
+            ajnaPool: address(ajnaPool),
+            borrowAmount: 1,
+            quoteAmount: 1,
+            swapPath: hex"01",
+            minAjnaOut: 1,
+            profitRecipient: profitRecipient
+        });
+
+        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutor.InvalidFlashPool.selector));
+        executor.executeFlashArb(params);
+    }
+
     function test_executeFlashArb_onlyOwner() public {
         FlashArbExecutor.ExecuteParams memory params = FlashArbExecutor.ExecuteParams({
             flashPool: address(flashPool),

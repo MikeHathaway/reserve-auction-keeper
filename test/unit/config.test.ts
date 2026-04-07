@@ -364,6 +364,50 @@ describe("config", () => {
     expect(config.chains[0].chainConfig.quoteTokens.USDC).toBeDefined();
   });
 
+  it("allows reusing a built-in quote token symbol when the address is unchanged", () => {
+    writeConfig({
+      chains: {
+        base: {
+          enabled: true,
+          rpcUrl: "https://base-rpc.example.com",
+          quoteTokens: {
+            usdc: {
+              address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            },
+          },
+        },
+      },
+      funded: { targetExitPriceUsd: 0.1 },
+    });
+
+    const config = loadConfig(CONFIG_FILE);
+    expect(config.chains[0].chainConfig.quoteTokens.USDC).toBe(
+      "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    );
+    expect(config.chains[0].chainConfig.coingeckoIds.quoteTokens.USDC).toBe("usd-coin");
+  });
+
+  it("requires a new coingeckoId when overriding a built-in quote token address in coingecko mode", () => {
+    writeConfig({
+      chains: {
+        base: {
+          enabled: true,
+          rpcUrl: "https://base-rpc.example.com",
+          quoteTokens: {
+            usdc: {
+              address: "0x1111111111111111111111111111111111111111",
+            },
+          },
+        },
+      },
+      funded: { targetExitPriceUsd: 0.1 },
+    });
+
+    expect(() => loadConfig(CONFIG_FILE)).toThrow(
+      "chains.base.quoteTokens.usdc.coingeckoId is required",
+    );
+  });
+
   it("requires coingeckoId for new quote tokens in coingecko mode", () => {
     writeConfig({
       chains: {
@@ -410,6 +454,33 @@ describe("config", () => {
       "0x1111111111111111111111111111111111111111",
     );
     expect(config.chains[0].chainConfig.coingeckoIds.quoteTokens.CBBTC).toBeUndefined();
+  });
+
+  it("drops the inherited coingeckoId when overriding a built-in address in alchemy mode", () => {
+    delete process.env.COINGECKO_API_KEY;
+    writeConfig({
+      chains: {
+        base: {
+          enabled: true,
+          rpcUrl: "https://base-rpc.example.com",
+          quoteTokens: {
+            usdc: {
+              address: "0x1111111111111111111111111111111111111111",
+            },
+          },
+        },
+      },
+      pricing: {
+        provider: "alchemy",
+      },
+      funded: { targetExitPriceUsd: 0.1 },
+    });
+
+    const config = loadConfig(CONFIG_FILE);
+    expect(config.chains[0].chainConfig.quoteTokens.USDC).toBe(
+      "0x1111111111111111111111111111111111111111",
+    );
+    expect(config.chains[0].chainConfig.coingeckoIds.quoteTokens.USDC).toBeUndefined();
   });
 
   it("loads PRIVATE_KEY_FILE when configured", () => {
