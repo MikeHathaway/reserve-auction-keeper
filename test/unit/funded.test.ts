@@ -514,7 +514,7 @@ describe("funded strategy", () => {
     })).resolves.toBe(0);
   });
 
-  it("estimateKickProfit uses a conservative net profit floor capped by maxTakeAmount", async () => {
+  it("estimateKickProfit is capped by the wallet's future funded buying power", async () => {
     const publicClient = {
       chain: BASE_CONFIG.chain,
       readContract: vi.fn().mockResolvedValue(parseEther("1")),
@@ -545,6 +545,6 @@ describe("funded strategy", () => {
       },
       prices: makeContext().prices,
       chainName: "base",
-    })).resolves.toBeCloseTo(0.142857, 6);
+    })).resolves.toBeCloseTo(0.01, 6);
   });
 });

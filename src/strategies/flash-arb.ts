@@ -423,6 +423,7 @@ export function createFlashArbStrategy(
       const route = resolveRoute(ctx);
       if (!route || !config.dexQuoter) return 0;
       if (config.minProfitUsd <= 0) return 0;
+      if (ctx.prices.ajnaPriceUsd <= 0) return 0;
 
       const quoteAmount = normalizeReserveTakeAmount(
         ctx.poolState.claimableReserves,
@@ -442,6 +443,14 @@ export function createFlashArbStrategy(
       );
       if (!quote) return 0;
       if (quote.slippagePercent > config.maxSlippagePercent) return 0;
+
+      const flashFeePpm = await getFlashPoolFeePpm(route.flashPool);
+      const minAjnaOut = applySlippageFloor(quote.amountOut);
+      const minAjnaOutFloat = Number(formatEther(minAjnaOut));
+      const minProfitAjna = config.minProfitUsd / ctx.prices.ajnaPriceUsd;
+      const flashFeeMultiplier = 1 + Number(flashFeePpm) / Number(UNISWAP_FEE_DENOMINATOR);
+      const maxBorrowAjna = (minAjnaOutFloat - minProfitAjna) / flashFeeMultiplier;
+      if (maxBorrowAjna <= 0) return 0;
 
       return config.minProfitUsd;
     },

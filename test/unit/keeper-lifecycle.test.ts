@@ -254,6 +254,10 @@ describe("keeper lifecycle", () => {
     mockFundedStrategy.execute.mockResolvedValue(undefined);
     mockFundedStrategy.estimateProfit.mockResolvedValue(0);
     mockFundedStrategy.estimateKickProfit.mockResolvedValue(0);
+    mockCreateAlchemyPricesClient.mockReturnValue({
+      getPrices: vi.fn().mockResolvedValue(new Map()),
+      isPriceStale: vi.fn(() => false),
+    });
   });
 
   it("propagates unexpected chain loop crashes instead of resolving cleanly", async () => {
@@ -269,6 +273,19 @@ describe("keeper lifecycle", () => {
     );
   });
 
+  it("propagates per-cycle keeper failures instead of retrying forever", async () => {
+    mockGetPoolReserveStates.mockRejectedValue(new Error("cycle boom"));
+
+    await expect(startKeeper(makeConfig())).rejects.toThrow("cycle boom");
+    expect(mockLogger.alert).toHaveBeenCalledWith(
+      "Chain loop crashed",
+      expect.objectContaining({
+        chain: "base",
+        error: "cycle boom",
+      }),
+    );
+  });
+
   it("resets stale shutdown state before starting loops", async () => {
     requestShutdown();
     mockGetPoolReserveStates.mockImplementation(async () => {
@@ -279,5 +296,23 @@ describe("keeper lifecycle", () => {
     await startKeeper(makeConfig());
 
     expect(mockGetPoolReserveStates).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails fast when alchemy-only pricing cannot price the chain AJNA token", async () => {
+    mockCreateAlchemyPricesClient.mockReturnValue({
+      getPrices: vi.fn().mockResolvedValue(new Map()),
+      isPriceStale: vi.fn(() => true),
+    });
+
+    await expect(startKeeper({
+      ...makeConfig(),
+      pricing: {
+        provider: "alchemy",
+      },
+      secrets: {
+        privateKey: PRIVATE_KEY,
+        alchemyApiKey: "test-alchemy-key",
+      },
+    })).rejects.toThrow("Alchemy-only pricing cannot price AJNA token");
   });
 });

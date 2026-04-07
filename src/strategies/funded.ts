@@ -117,10 +117,7 @@ export function createFundedStrategy(
     quoteValueUsd: number,
     ajnaPriceUsd: number,
   ): number {
-    const requiredValuePerAjnaUsd = Math.max(
-      config.targetExitPriceUsd,
-      ajnaPriceUsd * (1 + config.profitMarginPercent / 100),
-    );
+    const requiredValuePerAjnaUsd = getRequiredValuePerAjnaUsd(ajnaPriceUsd);
 
     if (requiredValuePerAjnaUsd <= 0) {
       return 0;
@@ -128,6 +125,13 @@ export function createFundedStrategy(
 
     const futureAjnaCostUsd = quoteValueUsd * ajnaPriceUsd / requiredValuePerAjnaUsd;
     return Math.max(0, quoteValueUsd - futureAjnaCostUsd);
+  }
+
+  function getRequiredValuePerAjnaUsd(ajnaPriceUsd: number): number {
+    return Math.max(
+      config.targetExitPriceUsd,
+      ajnaPriceUsd * (1 + config.profitMarginPercent / 100),
+    );
   }
 
   function getContextKey(ctx: AuctionContext): string {
@@ -415,9 +419,19 @@ export function createFundedStrategy(
       amount = normalizeReserveTakeAmount(amount, ctx.poolState.quoteTokenScale);
       if (amount === 0n) return 0;
 
+      const requiredValuePerAjnaUsd = getRequiredValuePerAjnaUsd(ctx.prices.ajnaPriceUsd);
+      if (requiredValuePerAjnaUsd <= 0 || ctx.prices.quoteTokenPriceUsd <= 0) {
+        return 0;
+      }
+
       const quoteValueUsd = Number(formatEther(amount)) * ctx.prices.quoteTokenPriceUsd;
+      const walletTakeCapacityUsd =
+        Number(formatEther(balance)) * requiredValuePerAjnaUsd;
+      const executableQuoteValueUsd = Math.min(quoteValueUsd, walletTakeCapacityUsd);
+      if (executableQuoteValueUsd <= 0) return 0;
+
       return estimateConservativeKickProfitUsd(
-        quoteValueUsd,
+        executableQuoteValueUsd,
         ctx.prices.ajnaPriceUsd,
       );
     },

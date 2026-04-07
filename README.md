@@ -26,6 +26,7 @@ Current status: funded strategy supports live execution. Mainnet uses a single-t
   `COINGECKO_API_KEY` for `pricing.provider = "coingecko"` or `"hybrid"`
   `COINGECKO_API_PLAN=demo|pro|auto` optionally pins the CoinGecko host/header, default `auto`
   `ALCHEMY_API_KEY` for `pricing.provider = "alchemy"` or `"hybrid"`
+  `pricing.provider = "alchemy"` fails fast at startup if Alchemy cannot price that chain's AJNA token
   `RPC_PROVIDER=alchemy` + `RPC_API_KEY` can be reused for Alchemy pricing automatically
 
 ### Setup
@@ -217,7 +218,7 @@ Flash-arb borrows AJNA or bwAJNA from a configured Uniswap V3 pool, calls `takeR
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `dryRun` | `true` | Log opportunities without executing. **Start here.** |
-| `pricing.provider` | `coingecko` | Price source: `coingecko`, `alchemy`, or asymmetric `hybrid` cross-check mode |
+| `pricing.provider` | `coingecko` | Price source: `coingecko`, `alchemy`, or asymmetric `hybrid` cross-check mode. `alchemy` fails fast on chains where Alchemy cannot price AJNA |
 | `COINGECKO_API_PLAN` | `auto` | CoinGecko auth mode: `demo`, `pro`, or `auto` host detection |
 | `chains.<chain>.quoteTokens.<symbol>.address` | unset | Adds or overrides a quote token whitelist entry for auto-discovery on that chain |
 | `chains.<chain>.quoteTokens.<symbol>.coingeckoId` | unset | Required for new tokens when `pricing.provider` is `coingecko` or `hybrid`; optional in `alchemy` mode |

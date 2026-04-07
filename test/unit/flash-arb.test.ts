@@ -261,4 +261,17 @@ describe("flash-arb strategy", () => {
       chainName: "base",
     })).resolves.toBe(0);
   });
+
+  it("estimateKickProfit returns zero when the quoted route can never cover the profit floor", async () => {
+    const { strategy } = makeStrategy({
+      amountOut: parseEther("5"),
+      minProfitUsd: 2,
+    });
+
+    await expect(strategy.estimateKickProfit({
+      poolState: makeContext().poolState,
+      prices: makeContext().prices,
+      chainName: "base",
+    })).resolves.toBe(0);
+  });
 });
