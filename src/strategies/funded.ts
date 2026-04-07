@@ -427,7 +427,16 @@ export function createFundedStrategy(
       const quoteValueUsd = Number(formatEther(amount)) * ctx.prices.quoteTokenPriceUsd;
       const walletTakeCapacityUsd =
         Number(formatEther(balance)) * requiredValuePerAjnaUsd;
-      const executableQuoteValueUsd = Math.min(quoteValueUsd, walletTakeCapacityUsd);
+      let executableQuoteValueUsd = Math.min(quoteValueUsd, walletTakeCapacityUsd);
+      if (!config.autoApprove || config.dryRun) {
+        const allowance = await getAllowance(ctx.poolState.pool);
+        const allowanceTakeCapacityUsd =
+          Number(formatEther(allowance)) * requiredValuePerAjnaUsd;
+        executableQuoteValueUsd = Math.min(
+          executableQuoteValueUsd,
+          allowanceTakeCapacityUsd,
+        );
+      }
       if (executableQuoteValueUsd <= 0) return 0;
 
       return estimateConservativeKickProfitUsd(

@@ -33,6 +33,7 @@ import {
   isProfitableAfterCosts,
   sumEstimatedCostsUsd,
 } from "./execution/gas.js";
+import { getErrorMessage, isTransientRpcError } from "./utils/retry.js";
 import { logger } from "./utils/logger.js";
 
 let shutdownRequested = false;
@@ -207,6 +208,14 @@ async function validateStandaloneAlchemyPricingSupport(
   }
 }
 
+function getTransientRetryDelayMs(
+  config: AppConfig,
+  consecutiveTransientErrors: number,
+): number {
+  const baseDelayMs = Math.max(250, config.polling.idleIntervalMs);
+  return Math.min(5_000, baseDelayMs * 2 ** Math.max(0, consecutiveTransientErrors - 1));
+}
+
 async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<void> {
   const { chainConfig, publicClient, strategy } = keeper;
   const chainName = chainConfig.chainConfig.name;
@@ -227,289 +236,304 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
     },
     chainConfig.chainConfig,
   );
-  await validateStandaloneAlchemyPricingSupport(
-    config.pricing.provider,
-    chainConfig,
-    alchemy,
-  );
-
   logger.info("Starting keeper loop", { chain: chainName });
-
-  // Initial pool discovery
-  keeper.pools = await discoverPools(
-    publicClient,
-    chainConfig.chainConfig,
-    chainConfig.pools,
-  );
-
-  logger.info("Monitoring pools", {
-    chain: chainName,
-    count: keeper.pools.length,
-  });
 
   let rediscoveryCounter = 0;
   const REDISCOVERY_INTERVAL = 50; // Re-discover pools every 50 cycles
   const EXECUTION_GAS_UNITS = 200_000n;
   const KICK_RESERVE_AUCTION_GAS_UNITS = 120_000n;
+  const MAX_CONSECUTIVE_TRANSIENT_ERRORS = 5;
+  let consecutiveTransientErrors = 0;
 
   while (!shutdownRequested) {
-    // Periodically re-discover pools
-    rediscoveryCounter++;
-    if (rediscoveryCounter >= REDISCOVERY_INTERVAL) {
-      rediscoveryCounter = 0;
-      keeper.pools = await discoverPools(
-        publicClient,
-        chainConfig.chainConfig,
-        chainConfig.pools.length > 0 ? chainConfig.pools : undefined,
-      );
-    }
+    try {
+      // Periodically re-discover pools, and always discover before the first cycle.
+      if (keeper.pools.length === 0 || rediscoveryCounter >= REDISCOVERY_INTERVAL) {
+        rediscoveryCounter = 0;
+        keeper.pools = await discoverPools(
+          publicClient,
+          chainConfig.chainConfig,
+          chainConfig.pools.length > 0 ? chainConfig.pools : undefined,
+        );
 
-    // 1. Get reserve states for all pools
-    const poolStates = await getPoolReserveStates(
-      publicClient,
-      chainConfig.chainConfig,
-      keeper.pools,
-    );
-
-    // 2. Separate active auctions and kickable pools
-    const activeAuctions = poolStates.filter((s) => s.hasActiveAuction);
-    const kickable = poolStates.filter((s) => s.isKickable);
-
-    // 3. Get auction prices for active auctions
-    const activePools = activeAuctions.map((a) => a.pool);
-    const auctionPrices = await getAuctionPrices(
-      publicClient,
-      chainConfig.chainConfig,
-      activePools,
-    );
-    const quoteTokenSymbols = [...new Set(
-      [...activeAuctions, ...kickable].map((poolState) => poolState.quoteTokenSymbol),
-    )];
-    const priceCache = quoteTokenSymbols.length > 0
-      ? await oracle.getPricesForQuoteTokens(quoteTokenSymbols)
-      : new Map<string, Awaited<ReturnType<typeof oracle.getPrices>>>();
-    const gasPricePromise = activeAuctions.length > 0 || kickable.length > 0
-      ? publicClient.getGasPrice()
-      : null;
-    const executionGasCheckPromise = gasPricePromise
-      ? gasPricePromise.then((gasPrice) =>
-          evaluateGasCost(
-            gasPrice,
-            config.gasPriceCeilingGwei,
-            EXECUTION_GAS_UNITS,
-            chainConfig.chainConfig.nativeTokenPriceUsd,
-          ))
-      : null;
-    const kickGasCheckPromise = gasPricePromise
-      ? gasPricePromise.then((gasPrice) =>
-          evaluateGasCost(
-            gasPrice,
-            config.gasPriceCeilingGwei,
-            KICK_RESERVE_AUCTION_GAS_UNITS,
-            chainConfig.chainConfig.nativeTokenPriceUsd,
-          ))
-      : null;
-
-    // 4. Evaluate and execute on each active auction
-    let anyNearProfitable = false;
-
-    for (const poolState of activeAuctions) {
-      const priceInfo = auctionPrices.get(poolState.pool);
-      if (!priceInfo) continue;
-
-      const prices = priceCache.get(poolState.quoteTokenSymbol) ?? null;
-      if (!prices) continue;
-
-      if (prices.isStale) {
-        logger.warn("Skipping execution due to stale prices", {
+        logger.info("Monitoring pools", {
           chain: chainName,
-          pool: poolState.pool,
+          count: keeper.pools.length,
         });
-        continue;
       }
 
-      const ctx: AuctionContext = {
-        poolState,
-        auctionPrice: priceInfo.auctionPrice,
-        prices,
-        chainName,
-      };
+      // 1. Get reserve states for all pools
+      const poolStates = await getPoolReserveStates(
+        publicClient,
+        chainConfig.chainConfig,
+        keeper.pools,
+      );
 
-      const profit = await strategy.estimateProfit(ctx);
-      const executionGasCheck = await executionGasCheckPromise!;
+      // 2. Separate active auctions and kickable pools
+      const activeAuctions = poolStates.filter((s) => s.hasActiveAuction);
+      const kickable = poolStates.filter((s) => s.isKickable);
 
-      if (
-        isNearProfitableAfterCosts(
+      // 3. Get auction prices for active auctions
+      const activePools = activeAuctions.map((a) => a.pool);
+      const auctionPrices = await getAuctionPrices(
+        publicClient,
+        chainConfig.chainConfig,
+        activePools,
+      );
+      const quoteTokenSymbols = [...new Set(
+        [...activeAuctions, ...kickable].map((poolState) => poolState.quoteTokenSymbol),
+      )];
+      const priceCache = quoteTokenSymbols.length > 0
+        ? await oracle.getPricesForQuoteTokens(quoteTokenSymbols)
+        : new Map<string, Awaited<ReturnType<typeof oracle.getPrices>>>();
+      const gasPricePromise = activeAuctions.length > 0 || kickable.length > 0
+        ? publicClient.getGasPrice()
+        : null;
+      const executionGasCheckPromise = gasPricePromise
+        ? gasPricePromise.then((gasPrice) =>
+            evaluateGasCost(
+              gasPrice,
+              config.gasPriceCeilingGwei,
+              EXECUTION_GAS_UNITS,
+              chainConfig.chainConfig.nativeTokenPriceUsd,
+            ))
+        : null;
+      const kickGasCheckPromise = gasPricePromise
+        ? gasPricePromise.then((gasPrice) =>
+            evaluateGasCost(
+              gasPrice,
+              config.gasPriceCeilingGwei,
+              KICK_RESERVE_AUCTION_GAS_UNITS,
+              chainConfig.chainConfig.nativeTokenPriceUsd,
+            ))
+        : null;
+
+      // 4. Evaluate and execute on each active auction
+      let anyNearProfitable = false;
+
+      for (const poolState of activeAuctions) {
+        const priceInfo = auctionPrices.get(poolState.pool);
+        if (!priceInfo) continue;
+
+        const prices = priceCache.get(poolState.quoteTokenSymbol) ?? null;
+        if (!prices) continue;
+
+        if (prices.isStale) {
+          logger.warn("Skipping execution due to stale prices", {
+            chain: chainName,
+            pool: poolState.pool,
+          });
+          continue;
+        }
+
+        const ctx: AuctionContext = {
+          poolState,
+          auctionPrice: priceInfo.auctionPrice,
+          prices,
+          chainName,
+        };
+
+        const profit = await strategy.estimateProfit(ctx);
+        const executionGasCheck = await executionGasCheckPromise!;
+
+        if (
+          isNearProfitableAfterCosts(
+            profit,
+            executionGasCheck.estimatedCostUsd,
+            config.profitMarginPercent,
+            config.polling.profitabilityThreshold,
+          )
+        ) {
+          anyNearProfitable = true;
+        }
+
+        if (executionGasCheck.isAboveCeiling) continue;
+
+        if (!isProfitableAfterCosts(
           profit,
           executionGasCheck.estimatedCostUsd,
           config.profitMarginPercent,
-          config.polling.profitabilityThreshold,
-        )
-      ) {
-        anyNearProfitable = true;
-      }
-
-      if (executionGasCheck.isAboveCeiling) continue;
-
-      if (!isProfitableAfterCosts(
-        profit,
-        executionGasCheck.estimatedCostUsd,
-        config.profitMarginPercent,
-      )) {
-        logger.debug("Not yet profitable", {
-          chain: chainName,
-          pool: poolState.pool,
-          estimatedProfitUsd: profit.toFixed(4),
-          gasCostUsd: executionGasCheck.estimatedCostUsd.toFixed(4),
-        });
-        continue;
-      }
-
-      const canExec = await strategy.canExecute(ctx);
-      if (!canExec) continue;
-
-      try {
-        const result = await strategy.execute(ctx);
-        logger.info("Execution successful", {
-          chain: chainName,
-          pool: result.pool,
-          strategy: strategy.name,
-          quoteTokenSymbol: poolState.quoteTokenSymbol,
-          priceSource: ctx.prices.source,
-          submissionMode: result.submissionMode,
-          txHash: result.txHash,
-          bundleHash: result.bundleHash,
-          targetBlock: result.targetBlock?.toString(),
-          privateSubmission: result.privateSubmission,
-          amountQuoteReceived: result.amountQuoteReceived.toString(),
-          ajnaCost: result.ajnaCost.toString(),
-          estimatedProfitUsd: result.profitUsd.toFixed(4),
-          profitUsd: result.profitUsd.toFixed(4),
-          realizedProfitUsd: result.realized?.profitUsd.toFixed(4),
-          realizedQuoteDelta: result.realized?.quoteTokenDelta.toString(),
-          realizedQuoteDeltaRaw: result.realized?.quoteTokenDeltaRaw.toString(),
-          realizedAjnaDelta: result.realized?.ajnaDelta.toString(),
-          realizedNativeDelta: result.realized?.nativeDelta.toString(),
-          gasFeeNative: result.realized?.gasFeeNative.toString(),
-          gasUsed: result.realized?.gasUsed.toString(),
-          effectiveGasPrice: result.realized?.effectiveGasPrice.toString(),
-          receiptBlockNumber: result.realized?.blockNumber.toString(),
-        });
-      } catch (error) {
-        logger.error("Execution failed", {
-          chain: chainName,
-          pool: poolState.pool,
-          strategy: strategy.name,
-          quoteTokenSymbol: poolState.quoteTokenSymbol,
-          priceSource: ctx.prices.source,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
-    }
-
-    // 5. Kick reserve auctions if eligible
-    for (const poolState of kickable) {
-      if (shutdownRequested) break;
-
-      const prices = priceCache.get(poolState.quoteTokenSymbol) ?? null;
-      if (!prices) continue;
-
-      if (prices.isStale) {
-        logger.warn("Skipping reserve-auction kick due to stale prices", {
-          chain: chainName,
-          pool: poolState.pool,
-          quoteTokenSymbol: poolState.quoteTokenSymbol,
-        });
-        continue;
-      }
-
-      const kickGasCheck = await kickGasCheckPromise!;
-      const executionGasCheck = await executionGasCheckPromise!;
-      if (kickGasCheck.isAboveCeiling) continue;
-      if (executionGasCheck.isAboveCeiling) continue;
-
-      const claimableValueUsd = estimateKickClaimableValueUsd(
-        poolState.claimableReserves,
-        prices.quoteTokenPriceUsd,
-      );
-      const kickCtx = {
-        poolState,
-        prices,
-        chainName,
-      };
-      const estimatedKickProfitUsd = await strategy.estimateKickProfit(kickCtx);
-      const totalExpectedCostUsd = sumEstimatedCostsUsd(
-        kickGasCheck.estimatedCostUsd,
-        executionGasCheck.estimatedCostUsd,
-      );
-      if (
-        !isProfitableAfterCosts(
-          estimatedKickProfitUsd,
-          totalExpectedCostUsd,
-          config.profitMarginPercent,
-        )
-      ) {
-        logger.debug("Skipping uneconomic reserve-auction kick", {
-          chain: chainName,
-          pool: poolState.pool,
-          quoteTokenSymbol: poolState.quoteTokenSymbol,
-          claimableReservesUsd: claimableValueUsd.toFixed(6),
-          kickGasCostUsd: kickGasCheck.estimatedCostUsd.toFixed(6),
-          futureExecutionGasCostUsd: executionGasCheck.estimatedCostUsd.toFixed(6),
-          estimatedKickProfitUsd: estimatedKickProfitUsd.toFixed(6),
-        });
-        continue;
-      }
-
-      const canKick = await canKickReserveAuction(publicClient, poolState.pool);
-      if (!canKick) {
-        logger.debug("Cannot kick auction (unsettled liquidations or other reason)", {
-          chain: chainName,
-          pool: poolState.pool,
-        });
-        continue;
-      }
-
-      logger.info("Kicking reserve auction", {
-        chain: chainName,
-        pool: poolState.pool,
-        dryRun: config.dryRun,
-      });
-
-      if (!config.dryRun) {
-        try {
-          const submission = await kickReserveAuction(
-            publicClient,
-            keeper.submitter,
-            keeper.walletClient.account!.address,
-            poolState.pool,
-          );
-
-          logger.info("Reserve auction kicked", {
+        )) {
+          logger.debug("Not yet profitable", {
             chain: chainName,
             pool: poolState.pool,
-            hash: submission.txHash,
-            submissionMode: submission.mode,
-            bundleHash: submission.bundleHash,
-            targetBlock: submission.targetBlock?.toString(),
-            receiptBlockNumber: submission.receiptBlockNumber.toString(),
+            estimatedProfitUsd: profit.toFixed(4),
+            gasCostUsd: executionGasCheck.estimatedCostUsd.toFixed(4),
+          });
+          continue;
+        }
+
+        const canExec = await strategy.canExecute(ctx);
+        if (!canExec) continue;
+
+        try {
+          const result = await strategy.execute(ctx);
+          logger.info("Execution successful", {
+            chain: chainName,
+            pool: result.pool,
+            strategy: strategy.name,
+            quoteTokenSymbol: poolState.quoteTokenSymbol,
+            priceSource: ctx.prices.source,
+            submissionMode: result.submissionMode,
+            txHash: result.txHash,
+            bundleHash: result.bundleHash,
+            targetBlock: result.targetBlock?.toString(),
+            privateSubmission: result.privateSubmission,
+            amountQuoteReceived: result.amountQuoteReceived.toString(),
+            ajnaCost: result.ajnaCost.toString(),
+            estimatedProfitUsd: result.profitUsd.toFixed(4),
+            profitUsd: result.profitUsd.toFixed(4),
+            realizedProfitUsd: result.realized?.profitUsd.toFixed(4),
+            realizedQuoteDelta: result.realized?.quoteTokenDelta.toString(),
+            realizedQuoteDeltaRaw: result.realized?.quoteTokenDeltaRaw.toString(),
+            realizedAjnaDelta: result.realized?.ajnaDelta.toString(),
+            realizedNativeDelta: result.realized?.nativeDelta.toString(),
+            gasFeeNative: result.realized?.gasFeeNative.toString(),
+            gasUsed: result.realized?.gasUsed.toString(),
+            effectiveGasPrice: result.realized?.effectiveGasPrice.toString(),
+            receiptBlockNumber: result.realized?.blockNumber.toString(),
           });
         } catch (error) {
-          logger.error("Failed to kick reserve auction", {
+          logger.error("Execution failed", {
             chain: chainName,
             pool: poolState.pool,
+            strategy: strategy.name,
+            quoteTokenSymbol: poolState.quoteTokenSymbol,
+            priceSource: ctx.prices.source,
             error: error instanceof Error ? error.message : String(error),
           });
         }
       }
+
+      // 5. Kick reserve auctions if eligible
+      for (const poolState of kickable) {
+        if (shutdownRequested) break;
+
+        const prices = priceCache.get(poolState.quoteTokenSymbol) ?? null;
+        if (!prices) continue;
+
+        if (prices.isStale) {
+          logger.warn("Skipping reserve-auction kick due to stale prices", {
+            chain: chainName,
+            pool: poolState.pool,
+            quoteTokenSymbol: poolState.quoteTokenSymbol,
+          });
+          continue;
+        }
+
+        const kickGasCheck = await kickGasCheckPromise!;
+        const executionGasCheck = await executionGasCheckPromise!;
+        if (kickGasCheck.isAboveCeiling) continue;
+        if (executionGasCheck.isAboveCeiling) continue;
+
+        const claimableValueUsd = estimateKickClaimableValueUsd(
+          poolState.claimableReserves,
+          prices.quoteTokenPriceUsd,
+        );
+        const kickCtx = {
+          poolState,
+          prices,
+          chainName,
+        };
+        const estimatedKickProfitUsd = await strategy.estimateKickProfit(kickCtx);
+        const totalExpectedCostUsd = sumEstimatedCostsUsd(
+          kickGasCheck.estimatedCostUsd,
+          executionGasCheck.estimatedCostUsd,
+        );
+        if (
+          !isProfitableAfterCosts(
+            estimatedKickProfitUsd,
+            totalExpectedCostUsd,
+            config.profitMarginPercent,
+          )
+        ) {
+          logger.debug("Skipping uneconomic reserve-auction kick", {
+            chain: chainName,
+            pool: poolState.pool,
+            quoteTokenSymbol: poolState.quoteTokenSymbol,
+            claimableReservesUsd: claimableValueUsd.toFixed(6),
+            kickGasCostUsd: kickGasCheck.estimatedCostUsd.toFixed(6),
+            futureExecutionGasCostUsd: executionGasCheck.estimatedCostUsd.toFixed(6),
+            estimatedKickProfitUsd: estimatedKickProfitUsd.toFixed(6),
+          });
+          continue;
+        }
+
+        const canKick = await canKickReserveAuction(publicClient, poolState.pool);
+        if (!canKick) {
+          logger.debug("Cannot kick auction (unsettled liquidations or other reason)", {
+            chain: chainName,
+            pool: poolState.pool,
+          });
+          continue;
+        }
+
+        logger.info("Kicking reserve auction", {
+          chain: chainName,
+          pool: poolState.pool,
+          dryRun: config.dryRun,
+        });
+
+        if (!config.dryRun) {
+          try {
+            const submission = await kickReserveAuction(
+              publicClient,
+              keeper.submitter,
+              keeper.walletClient.account!.address,
+              poolState.pool,
+            );
+
+            logger.info("Reserve auction kicked", {
+              chain: chainName,
+              pool: poolState.pool,
+              hash: submission.txHash,
+              submissionMode: submission.mode,
+              bundleHash: submission.bundleHash,
+              targetBlock: submission.targetBlock?.toString(),
+              receiptBlockNumber: submission.receiptBlockNumber.toString(),
+            });
+          } catch (error) {
+            logger.error("Failed to kick reserve auction", {
+              chain: chainName,
+              pool: poolState.pool,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
+      }
+
+      consecutiveTransientErrors = 0;
+      rediscoveryCounter++;
+
+      // 6. Adaptive sleep
+      const sleepMs = anyNearProfitable
+        ? config.polling.activeIntervalMs
+        : config.polling.idleIntervalMs;
+
+      await sleep(sleepMs);
+    } catch (error) {
+      if (!isTransientRpcError(error)) {
+        throw error;
+      }
+
+      consecutiveTransientErrors++;
+      const retryDelayMs = getTransientRetryDelayMs(config, consecutiveTransientErrors);
+      logger.warn("Transient chain loop error, retrying", {
+        chain: chainName,
+        consecutiveTransientErrors,
+        maxConsecutiveTransientErrors: MAX_CONSECUTIVE_TRANSIENT_ERRORS,
+        retryDelayMs,
+        error: getErrorMessage(error),
+      });
+
+      if (consecutiveTransientErrors >= MAX_CONSECUTIVE_TRANSIENT_ERRORS) {
+        throw new Error(
+          `Exceeded transient retry budget for ${chainName}: ${getErrorMessage(error)}`,
+        );
+      }
+
+      await sleep(retryDelayMs);
     }
-
-    // 6. Adaptive sleep
-    const sleepMs = anyNearProfitable
-      ? config.polling.activeIntervalMs
-      : config.polling.idleIntervalMs;
-
-    await sleep(sleepMs);
   }
 
   logger.info("Chain loop stopped", { chain: chainName });
@@ -547,6 +571,18 @@ export async function startKeeper(config: AppConfig): Promise<void> {
     chains: config.chains.map((c) => c.chainConfig.name),
     dryRun: config.dryRun,
   });
+
+  const startupAlchemy = config.secrets.alchemyApiKey
+    ? createAlchemyPricesClient(config.secrets.alchemyApiKey)
+    : undefined;
+  await Promise.all(
+    config.chains.map((chain) =>
+      validateStandaloneAlchemyPricingSupport(
+        config.pricing.provider,
+        chain,
+        startupAlchemy,
+      )),
+  );
 
   const keepers = config.chains.map((chain) => createChainKeeper(chain, config));
 

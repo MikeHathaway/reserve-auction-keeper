@@ -514,6 +514,73 @@ describe("funded strategy", () => {
     })).resolves.toBe(0);
   });
 
+  it("estimateKickProfit returns zero when allowance is insufficient and auto-approve is disabled", async () => {
+    const publicClient = {
+      chain: BASE_CONFIG.chain,
+      readContract: vi.fn()
+        .mockResolvedValueOnce(parseEther("10"))
+        .mockResolvedValueOnce(0n),
+    };
+    const walletClient = {
+      account: { address: WALLET_ADDRESS },
+    };
+
+    const strategy = createFundedStrategy(
+      publicClient as never,
+      walletClient as never,
+      BASE_CONFIG.ajnaToken,
+      makeSubmitter(),
+      {
+        targetExitPriceUsd: 0.1,
+        autoApprove: false,
+        profitMarginPercent: 5,
+        dryRun: true,
+        nativeTokenPriceUsd: BASE_CONFIG.nativeTokenPriceUsd,
+      },
+    );
+
+    await expect(strategy.estimateKickProfit({
+      poolState: makeContext().poolState,
+      prices: makeContext().prices,
+      chainName: "base",
+    })).resolves.toBe(0);
+  });
+
+  it("estimateKickProfit ignores missing allowance when live auto-approve is enabled", async () => {
+    const publicClient = {
+      chain: BASE_CONFIG.chain,
+      readContract: vi.fn().mockResolvedValue(parseEther("1")),
+    };
+    const walletClient = {
+      account: { address: WALLET_ADDRESS },
+    };
+
+    const strategy = createFundedStrategy(
+      publicClient as never,
+      walletClient as never,
+      BASE_CONFIG.ajnaToken,
+      makeSubmitter(),
+      {
+        targetExitPriceUsd: 0.1,
+        maxTakeAmount: parseEther("3"),
+        autoApprove: true,
+        profitMarginPercent: 5,
+        dryRun: false,
+        nativeTokenPriceUsd: BASE_CONFIG.nativeTokenPriceUsd,
+      },
+    );
+
+    await expect(strategy.estimateKickProfit({
+      poolState: {
+        ...makeContext().poolState,
+        claimableReserves: parseEther("10"),
+      },
+      prices: makeContext().prices,
+      chainName: "base",
+    })).resolves.toBeCloseTo(0.01, 6);
+    expect(publicClient.readContract).toHaveBeenCalledTimes(1);
+  });
+
   it("estimateKickProfit is capped by the wallet's future funded buying power", async () => {
     const publicClient = {
       chain: BASE_CONFIG.chain,

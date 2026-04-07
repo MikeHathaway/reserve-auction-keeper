@@ -286,6 +286,28 @@ describe("keeper lifecycle", () => {
     );
   });
 
+  it("retries transient per-cycle errors without crashing the keeper", async () => {
+    mockGetPoolReserveStates
+      .mockRejectedValueOnce(new Error("fetch failed"))
+      .mockImplementationOnce(async () => {
+        requestShutdown();
+        return [];
+      });
+
+    await startKeeper(makeConfig());
+
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      "Transient chain loop error, retrying",
+      expect.objectContaining({
+        chain: "base",
+        consecutiveTransientErrors: 1,
+        retryDelayMs: 250,
+        error: "fetch failed",
+      }),
+    );
+    expect(mockLogger.alert).not.toHaveBeenCalled();
+  });
+
   it("resets stale shutdown state before starting loops", async () => {
     requestShutdown();
     mockGetPoolReserveStates.mockImplementation(async () => {
@@ -314,5 +336,6 @@ describe("keeper lifecycle", () => {
         alchemyApiKey: "test-alchemy-key",
       },
     })).rejects.toThrow("Alchemy-only pricing cannot price AJNA token");
+    expect(mockDiscoverPools).not.toHaveBeenCalled();
   });
 });
