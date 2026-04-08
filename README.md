@@ -213,6 +213,22 @@ Flash-arb borrows AJNA or bwAJNA from a configured Uniswap V3 pool, calls `takeR
 - `flashArb.routes.<chain>.executorAddress` or top-level `flashArb.executorAddress` must point at a deployed `FlashArbExecutor`
 - The runtime path is live, but you should still treat it as advanced/operator-only until fork tests exist for your target chains
 
+Deploy the executor with:
+
+```bash
+DEPLOY_CHAIN=base npm run deploy:flash-arb-executor
+DEPLOY_CHAIN=base npm run deploy:flash-arb-executor -- --broadcast --private-key "$DEPLOYER_PRIVATE_KEY"
+```
+
+The wrapper fills `FLASH_ARB_EXECUTOR_AJNA_TOKEN` from the built-in chain preset for `mainnet`, `base`, `arbitrum`, `optimism`, or `polygon`, resolves the RPC URL from `DEPLOY_RPC_URL` or `RPC_PROVIDER` + `RPC_API_KEY`, and defaults the Uniswap V3 router/factory/init-code-hash to the standard deployment values. Override any constructor input with:
+
+- `FLASH_ARB_EXECUTOR_AJNA_TOKEN`
+- `FLASH_ARB_EXECUTOR_SWAP_ROUTER`
+- `FLASH_ARB_EXECUTOR_UNISWAP_V3_FACTORY`
+- `FLASH_ARB_EXECUTOR_UNISWAP_V3_POOL_INIT_CODE_HASH`
+
+If you already have a custom RPC URL for the target network, set `DEPLOY_RPC_URL` directly instead of relying on provider-based auto-construction.
+
 ### Key Settings
 
 | Setting | Default | Description |

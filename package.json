@@ -8,6 +8,7 @@
     "preanalytics:executions": "npm run build",
     "analytics:executions": "node scripts/analyze-executions.mjs",
     "build": "tsc",
+    "deploy:flash-arb-executor": "node scripts/deploy-flash-arb-executor.mjs",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "lint": "eslint .",
