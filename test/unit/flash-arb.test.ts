@@ -70,11 +70,27 @@ function makeStrategy({
   minLiquidityUsd = 10,
   minProfitUsd = 0.1,
   swapPath = PATH,
+  flashPoolLiquidity = 1n,
+  flashPoolAjnaBalance = parseEther("500"),
 } = {}) {
-  const readContract = vi.fn(async ({ functionName }: { functionName: string }) => {
-    if (functionName === "token0") return QUOTE_TOKEN_ADDRESS;
-    if (functionName === "token1") return BASE_CONFIG.ajnaToken;
-    if (functionName === "fee") return BigInt(FLASH_POOL_FEE);
+  const readContract = vi.fn(async (
+    {
+      address,
+      functionName,
+      args,
+    }: { address: string; functionName: string; args?: readonly string[] },
+  ) => {
+    if (address === FLASH_POOL_ADDRESS && functionName === "token0") return QUOTE_TOKEN_ADDRESS;
+    if (address === FLASH_POOL_ADDRESS && functionName === "token1") return BASE_CONFIG.ajnaToken;
+    if (address === FLASH_POOL_ADDRESS && functionName === "fee") return BigInt(FLASH_POOL_FEE);
+    if (address === FLASH_POOL_ADDRESS && functionName === "liquidity") return flashPoolLiquidity;
+    if (
+      address === BASE_CONFIG.ajnaToken &&
+      functionName === "balanceOf" &&
+      args?.[0] === FLASH_POOL_ADDRESS
+    ) {
+      return flashPoolAjnaBalance;
+    }
     throw new Error(`Unexpected readContract function ${functionName}`);
   });
   const publicClient = {
@@ -157,6 +173,20 @@ describe("flash-arb strategy", () => {
     expect(dexQuoter.quoteQuoteToAjna).not.toHaveBeenCalled();
   });
 
+  it("rejects candidates when the configured flash-loan pool has zero liquidity", async () => {
+    const { strategy, dexQuoter } = makeStrategy({ flashPoolLiquidity: 0n });
+
+    await expect(strategy.canExecute(makeContext())).resolves.toBe(false);
+    expect(dexQuoter.quoteQuoteToAjna).not.toHaveBeenCalled();
+  });
+
+  it("rejects candidates when the flash-loan pool cannot cover the required AJNA borrow", async () => {
+    const { strategy, dexQuoter } = makeStrategy({ flashPoolAjnaBalance: parseEther("40") });
+
+    await expect(strategy.canExecute(makeContext())).resolves.toBe(false);
+    expect(dexQuoter.quoteQuoteToAjna).not.toHaveBeenCalled();
+  });
+
   it("simulates executor execution during dry runs", async () => {
     const { strategy, publicClient } = makeStrategy();
     const ctx = makeContext();
@@ -189,17 +219,43 @@ describe("flash-arb strategy", () => {
     vi.mocked(publicClient.getBalance)
       .mockResolvedValueOnce(parseEther("1"))
       .mockResolvedValueOnce(parseEther("0.99995"));
-    let balanceReadCount = 0;
-    vi.mocked(publicClient.readContract).mockImplementation(async ({ functionName }: { functionName: string }) => {
-      if (functionName === "token0") return QUOTE_TOKEN_ADDRESS;
-      if (functionName === "token1") return BASE_CONFIG.ajnaToken;
-      if (functionName === "fee") return BigInt(FLASH_POOL_FEE);
-      if (functionName === "balanceOf") {
-        balanceReadCount += 1;
-        if (balanceReadCount === 1) return parseEther("5");
-        if (balanceReadCount === 2) return 0n;
-        if (balanceReadCount === 3) return parseEther("8");
-        if (balanceReadCount === 4) return 0n;
+    let walletAjnaReadCount = 0;
+    let walletQuoteReadCount = 0;
+    vi.mocked(publicClient.readContract).mockImplementation(async (
+      {
+        address,
+        functionName,
+        args,
+      }: { address: string; functionName: string; args?: readonly string[] },
+    ) => {
+      if (address === FLASH_POOL_ADDRESS && functionName === "token0") return QUOTE_TOKEN_ADDRESS;
+      if (address === FLASH_POOL_ADDRESS && functionName === "token1") return BASE_CONFIG.ajnaToken;
+      if (address === FLASH_POOL_ADDRESS && functionName === "fee") return BigInt(FLASH_POOL_FEE);
+      if (address === FLASH_POOL_ADDRESS && functionName === "liquidity") return 1n;
+      if (
+        address === BASE_CONFIG.ajnaToken &&
+        functionName === "balanceOf" &&
+        args?.[0] === FLASH_POOL_ADDRESS
+      ) {
+        return parseEther("500");
+      }
+      if (
+        address === BASE_CONFIG.ajnaToken &&
+        functionName === "balanceOf" &&
+        args?.[0] === WALLET_ADDRESS
+      ) {
+        walletAjnaReadCount += 1;
+        if (walletAjnaReadCount === 1) return parseEther("5");
+        if (walletAjnaReadCount === 2) return parseEther("8");
+      }
+      if (
+        address === QUOTE_TOKEN_ADDRESS &&
+        functionName === "balanceOf" &&
+        args?.[0] === WALLET_ADDRESS
+      ) {
+        walletQuoteReadCount += 1;
+        if (walletQuoteReadCount === 1) return 0n;
+        if (walletQuoteReadCount === 2) return 0n;
       }
       throw new Error(`Unexpected live readContract function ${functionName}`);
     });
@@ -308,5 +364,20 @@ describe("flash-arb strategy", () => {
       prices: makeContext().prices,
       chainName: "base",
     })).resolves.toBe(0);
+  });
+
+  it("estimateKickProfit returns zero when the flash-loan pool cannot cover the future borrow", async () => {
+    const { strategy, dexQuoter } = makeStrategy({
+      amountOut: parseEther("130"),
+      minProfitUsd: 2,
+      flashPoolAjnaBalance: parseEther("40"),
+    });
+
+    await expect(strategy.estimateKickProfit({
+      poolState: makeContext().poolState,
+      prices: makeContext().prices,
+      chainName: "base",
+    })).resolves.toBe(0);
+    expect(dexQuoter.quoteQuoteToAjna).not.toHaveBeenCalled();
   });
 });

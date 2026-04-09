@@ -32,6 +32,15 @@ import {
 
 const UNISWAP_FEE_DENOMINATOR = 1_000_000n;
 const SLIPPAGE_BPS_DENOMINATOR = 10_000n;
+const ERC20_BALANCE_ABI = [
+  {
+    inputs: [{ name: "account", type: "address" }],
+    name: "balanceOf",
+    outputs: [{ name: "", type: "uint256" }],
+    stateMutability: "view",
+    type: "function",
+  },
+] as const;
 
 interface FlashArbRouteConfig {
   executorAddress?: Address;
@@ -141,6 +150,16 @@ export function createFlashArbStrategy(
     return pendingIdentity;
   }
 
+  async function getFlashPoolAjnaBalance(flashPool: Address): Promise<bigint> {
+    const balance = await publicClient.readContract({
+      address: config.ajnaToken,
+      abi: ERC20_BALANCE_ABI,
+      functionName: "balanceOf",
+      args: [flashPool],
+    });
+    return typeof balance === "bigint" ? balance : BigInt(balance);
+  }
+
   async function resolveRoute(ctx: RouteContext): Promise<ResolvedRoute | null> {
     if (!config.route) {
       warnOnce("Flash-arb route config missing for chain", `route:${ctx.chainName}`, ctx);
@@ -208,6 +227,15 @@ export function createFlashArbStrategy(
       return null;
     }
 
+    if (flashPoolIdentity.liquidity === 0n) {
+      warnOnce(
+        "Flash-arb flash pool has zero liquidity and cannot be used as a borrow source",
+        `flashPoolLiquidity:${ctx.chainName}:${ctx.poolState.quoteTokenSymbol}`,
+        ctx,
+      );
+      return null;
+    }
+
     return { executorAddress, flashPool, swapPath, flashPoolIdentity };
   }
 
@@ -252,6 +280,28 @@ export function createFlashArbStrategy(
       return null;
     }
 
+    const borrowAmount = calculateReserveTakeAjnaCost(
+      quoteAmount,
+      ctx.auctionPrice,
+    );
+    if (borrowAmount === 0n) {
+      lastCandidate = { key, candidate: null };
+      return null;
+    }
+
+    const availableBorrowAjna = await getFlashPoolAjnaBalance(route.flashPool);
+    if (availableBorrowAjna < borrowAmount) {
+      logger.debug("Flash-arb candidate rejected because flash pool cannot cover the borrow amount", {
+        chain: ctx.chainName,
+        pool: ctx.poolState.pool,
+        flashPool: route.flashPool,
+        borrowAmount: formatEther(borrowAmount),
+        availableBorrowAjna: formatEther(availableBorrowAjna),
+      });
+      lastCandidate = { key, candidate: null };
+      return null;
+    }
+
     const quote = await config.dexQuoter.quoteQuoteToAjna(
       ctx.poolState.quoteTokenSymbol,
       quoteAmount,
@@ -270,15 +320,6 @@ export function createFlashArbStrategy(
         slippagePercent: quote.slippagePercent.toFixed(2),
         maxSlippagePercent: config.maxSlippagePercent,
       });
-      lastCandidate = { key, candidate: null };
-      return null;
-    }
-
-    const borrowAmount = calculateReserveTakeAjnaCost(
-      quoteAmount,
-      ctx.auctionPrice,
-    );
-    if (borrowAmount === 0n) {
       lastCandidate = { key, candidate: null };
       return null;
     }
@@ -470,6 +511,15 @@ export function createFlashArbStrategy(
       const liquidityUsd =
         Number(formatEther(quoteAmount)) * ctx.prices.quoteTokenPriceUsd;
       if (liquidityUsd < config.minLiquidityUsd) return 0;
+
+      const borrowAmount = calculateReserveTakeAjnaCost(
+        quoteAmount,
+        ctx.poolState.auctionPrice,
+      );
+      if (borrowAmount === 0n) return 0;
+
+      const availableBorrowAjna = await getFlashPoolAjnaBalance(route.flashPool);
+      if (availableBorrowAjna < borrowAmount) return 0;
 
       const quote = await config.dexQuoter.quoteQuoteToAjna(
         ctx.poolState.quoteTokenSymbol,

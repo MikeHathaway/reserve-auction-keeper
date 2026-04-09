@@ -32,6 +32,13 @@ export const UNISWAP_V3_POOL_IDENTITY_ABI = [
     stateMutability: "view",
     type: "function",
   },
+  {
+    inputs: [],
+    name: "liquidity",
+    outputs: [{ name: "", type: "uint128" }],
+    stateMutability: "view",
+    type: "function",
+  },
 ] as const;
 
 export interface UniswapV3PoolIdentity {
@@ -39,6 +46,7 @@ export interface UniswapV3PoolIdentity {
   token0: Address;
   token1: Address;
   fee: bigint;
+  liquidity: bigint;
 }
 
 export interface UniswapV3PathHop {
@@ -141,7 +149,7 @@ export async function readUniswapV3PoolIdentity(
   publicClient: PublicClient,
   poolAddress: Address,
 ): Promise<UniswapV3PoolIdentity> {
-  const [token0, token1, fee] = await Promise.all([
+  const [token0, token1, fee, liquidity] = await Promise.all([
     publicClient.readContract({
       address: poolAddress,
       abi: UNISWAP_V3_POOL_IDENTITY_ABI,
@@ -157,6 +165,11 @@ export async function readUniswapV3PoolIdentity(
       abi: UNISWAP_V3_POOL_IDENTITY_ABI,
       functionName: "fee",
     }),
+    publicClient.readContract({
+      address: poolAddress,
+      abi: UNISWAP_V3_POOL_IDENTITY_ABI,
+      functionName: "liquidity",
+    }),
   ]);
 
   return {
@@ -164,5 +177,6 @@ export async function readUniswapV3PoolIdentity(
     token0: token0 as Address,
     token1: token1 as Address,
     fee: typeof fee === "bigint" ? fee : BigInt(fee),
+    liquidity: typeof liquidity === "bigint" ? liquidity : BigInt(liquidity),
   };
 }
