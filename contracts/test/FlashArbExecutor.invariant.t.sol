@@ -52,6 +52,7 @@ contract UnauthorizedFlashArbActor {
 contract FlashArbExecutorHandler {
     uint256 internal constant WAD = 1e18;
     uint24 internal constant POOL_FEE = 3000;
+    uint24 internal constant SWAP_PATH_FEE = 500;
     uint256 internal constant FLASH_FEE = 1 * WAD;
     uint256 internal constant MAX_NORMALIZED_QUOTE = 5_000 * WAD;
     uint256 internal constant MAX_PROFIT = 25 * WAD;
@@ -117,6 +118,10 @@ contract FlashArbExecutorHandler {
         expectedFlashPoolBalance = ajna.balanceOf(address(flashPool));
     }
 
+    function _swapPath() internal view returns (bytes memory) {
+        return abi.encodePacked(address(quote), SWAP_PATH_FEE, address(ajna));
+    }
+
     function executeScenario(
         uint96 normalizedQuoteSeed,
         uint96 profitSeed,
@@ -143,7 +148,7 @@ contract FlashArbExecutorHandler {
             ajnaPool: address(ajnaPool),
             borrowAmount: borrowAmount,
             quoteAmount: quoteAmount,
-            swapPath: hex"010203",
+            swapPath: _swapPath(),
             minAjnaOut: borrowAmount + FLASH_FEE + profitAmount,
             profitRecipient: PROFIT_RECIPIENT
         });
@@ -257,7 +262,7 @@ contract FlashArbExecutorHandler {
             ajnaPool: address(ajnaPool),
             borrowAmount: borrowAmount,
             quoteAmount: quoteAmount,
-            swapPath: hex"010203",
+            swapPath: _swapPath(),
             minAjnaOut: borrowAmount + FLASH_FEE + profitAmount,
             profitRecipient: PROFIT_RECIPIENT
         });

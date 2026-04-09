@@ -105,6 +105,7 @@ contract ReenteringRecoverRouter is ISwapRouterLike {
 contract FlashArbExecutorTest is TestBase {
     uint256 internal constant WAD = 1e18;
     uint24 internal constant POOL_FEE = 3000;
+    uint24 internal constant SWAP_PATH_FEE = 500;
     uint256 internal constant QUOTE_TOKEN_SCALE = 1e12;
     uint256 internal constant QUOTE_TOKEN_RAW = 50 * 1e6;
     uint256 internal constant QUOTE_TOKEN_WAD = QUOTE_TOKEN_RAW * QUOTE_TOKEN_SCALE;
@@ -119,6 +120,18 @@ contract FlashArbExecutorTest is TestBase {
     FlashArbExecutor internal executor;
 
     address internal profitRecipient = address(0xBEEF);
+
+    function _swapPath(uint24 fee) internal view returns (bytes memory) {
+        return _swapPathFor(address(quote), fee, address(ajna));
+    }
+
+    function _swapPathFor(
+        address tokenIn,
+        uint24 fee,
+        address tokenOut
+    ) internal pure returns (bytes memory) {
+        return abi.encodePacked(tokenIn, fee, tokenOut);
+    }
 
     function setUp() public {
         ajna = new MockERC20("Ajna", "AJNA");
@@ -150,7 +163,7 @@ contract FlashArbExecutorTest is TestBase {
             ajnaPool: address(ajnaPool),
             borrowAmount: 100 * WAD,
             quoteAmount: QUOTE_TOKEN_WAD,
-            swapPath: hex"010203",
+            swapPath: _swapPath(SWAP_PATH_FEE),
             minAjnaOut: 104 * WAD,
             profitRecipient: profitRecipient
         });
@@ -173,7 +186,7 @@ contract FlashArbExecutorTest is TestBase {
             ajnaPool: address(ajnaPool),
             borrowAmount: 100 * WAD,
             quoteAmount: QUOTE_TOKEN_WAD,
-            swapPath: hex"010203",
+            swapPath: _swapPath(SWAP_PATH_FEE),
             minAjnaOut: 104 * WAD,
             profitRecipient: profitRecipient
         });
@@ -208,7 +221,7 @@ contract FlashArbExecutorTest is TestBase {
             ajnaPool: address(ajnaPool),
             borrowAmount: 100 * WAD,
             quoteAmount: QUOTE_TOKEN_WAD,
-            swapPath: hex"010203",
+            swapPath: _swapPath(SWAP_PATH_FEE),
             minAjnaOut: 104 * WAD,
             profitRecipient: profitRecipient
         });
@@ -228,7 +241,7 @@ contract FlashArbExecutorTest is TestBase {
             ajnaPool: address(ajnaPool),
             borrowAmount: 100 * WAD,
             quoteAmount: QUOTE_TOKEN_WAD,
-            swapPath: hex"010203",
+            swapPath: _swapPath(SWAP_PATH_FEE),
             minAjnaOut: 104 * WAD,
             profitRecipient: profitRecipient
         });
@@ -260,7 +273,7 @@ contract FlashArbExecutorTest is TestBase {
             ajnaPool: address(ajnaPool),
             borrowAmount: 100 * WAD,
             quoteAmount: QUOTE_TOKEN_WAD,
-            swapPath: hex"010203",
+            swapPath: _swapPath(SWAP_PATH_FEE),
             minAjnaOut: 100 * WAD,
             profitRecipient: profitRecipient
         });
@@ -302,7 +315,7 @@ contract FlashArbExecutorTest is TestBase {
             ajnaPool: address(ajnaPool),
             borrowAmount: 100 * WAD,
             quoteAmount: QUOTE_TOKEN_WAD,
-            swapPath: hex"010203",
+            swapPath: _swapPath(SWAP_PATH_FEE),
             minAjnaOut: 104 * WAD,
             profitRecipient: profitRecipient
         });
@@ -466,7 +479,7 @@ contract FlashArbExecutorTest is TestBase {
             ajnaPool: address(localAjnaPool),
             borrowAmount: 100 * WAD,
             quoteAmount: QUOTE_TOKEN_WAD,
-            swapPath: hex"010203",
+            swapPath: _swapPathFor(address(localQuote), SWAP_PATH_FEE, address(localAjna)),
             minAjnaOut: 104 * WAD,
             profitRecipient: profitRecipient
         });
@@ -512,12 +525,48 @@ contract FlashArbExecutorTest is TestBase {
             ajnaPool: address(malformedPool),
             borrowAmount: 100 * WAD,
             quoteAmount: QUOTE_TOKEN_WAD,
-            swapPath: hex"010203",
+            swapPath: _swapPath(SWAP_PATH_FEE),
             minAjnaOut: 104 * WAD,
             profitRecipient: profitRecipient
         });
 
         vm.expectRevert(abi.encodeWithSelector(FlashArbExecutor.InvalidQuoteAmount.selector));
+        executor.executeFlashArb(params);
+    }
+
+    function test_executeFlashArb_revertsWhenSwapPathReusesFlashPool() public {
+        router.setNextAmountOut(105 * WAD);
+
+        FlashArbExecutor.ExecuteParams memory params = FlashArbExecutor.ExecuteParams({
+            flashPool: address(flashPool),
+            ajnaPool: address(ajnaPool),
+            borrowAmount: 100 * WAD,
+            quoteAmount: QUOTE_TOKEN_WAD,
+            swapPath: _swapPath(POOL_FEE),
+            minAjnaOut: 104 * WAD,
+            profitRecipient: profitRecipient
+        });
+
+        vm.expectRevert(
+            abi.encodeWithSelector(FlashArbExecutor.FlashPoolReuseInSwapPath.selector)
+        );
+        executor.executeFlashArb(params);
+    }
+
+    function test_executeFlashArb_revertsWhenSwapPathDoesNotStartWithQuoteToken() public {
+        router.setNextAmountOut(105 * WAD);
+
+        FlashArbExecutor.ExecuteParams memory params = FlashArbExecutor.ExecuteParams({
+            flashPool: address(flashPool),
+            ajnaPool: address(ajnaPool),
+            borrowAmount: 100 * WAD,
+            quoteAmount: QUOTE_TOKEN_WAD,
+            swapPath: abi.encodePacked(address(ajna), SWAP_PATH_FEE, address(quote)),
+            minAjnaOut: 104 * WAD,
+            profitRecipient: profitRecipient
+        });
+
+        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutor.InvalidSwapPath.selector));
         executor.executeFlashArb(params);
     }
 }

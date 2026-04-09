@@ -48,6 +48,8 @@ contract FlashArbExecutor is IUniswapV3FlashCallback {
     error InvalidFactoryPool();
     error InvalidBorrowBalance();
     error InvalidQuoteAmount();
+    error InvalidSwapPath();
+    error FlashPoolReuseInSwapPath();
     error UnsupportedBorrowToken();
     error InsufficientRepayment();
 
@@ -141,7 +143,6 @@ contract FlashArbExecutor is IUniswapV3FlashCallback {
         }
         activeFlashPool = address(0);
         activeCallbackHash = bytes32(0);
-        if (!_isCanonicalFactoryPool(params.flashPool)) revert InvalidFactoryPool();
 
         uint256 startingAjnaBalance = IERC20Like(ajnaToken).balanceOf(address(this));
         if (startingAjnaBalance < params.borrowAmount) revert InvalidBorrowBalance();
@@ -150,17 +151,36 @@ contract FlashArbExecutor is IUniswapV3FlashCallback {
 
         _approveExact(ajnaToken, params.ajnaPool, params.borrowAmount);
 
-        IAjnaPoolLike ajnaPool = IAjnaPoolLike(params.ajnaPool);
-        uint256 quoteReceived = ajnaPool.takeReserves(params.quoteAmount);
+        address quoteToken;
+        uint256 quoteTokenAmount;
+        {
+            (bool ok, address flashToken0, address flashToken1, uint24 flashFee) =
+                _readPoolIdentity(params.flashPool);
+            if (!ok) revert InvalidFlashPool();
+            if (!_isCanonicalFactoryPool(params.flashPool, flashToken0, flashToken1, flashFee)) {
+                revert InvalidFactoryPool();
+            }
 
-        address quoteToken = ajnaPool.quoteTokenAddress();
-        uint256 quoteTokenScale = ajnaPool.quoteTokenScale();
-        if (quoteTokenScale == 0 || quoteReceived % quoteTokenScale != 0) {
-            revert InvalidQuoteAmount();
+            IAjnaPoolLike ajnaPool = IAjnaPoolLike(params.ajnaPool);
+            uint256 quoteReceived = ajnaPool.takeReserves(params.quoteAmount);
+
+            quoteToken = ajnaPool.quoteTokenAddress();
+            uint256 quoteTokenScale = ajnaPool.quoteTokenScale();
+            if (quoteTokenScale == 0 || quoteReceived % quoteTokenScale != 0) {
+                revert InvalidQuoteAmount();
+            }
+
+            quoteTokenAmount = quoteReceived / quoteTokenScale;
+            if (quoteTokenAmount == 0) revert InvalidQuoteAmount();
+            _validateSwapPath(
+                params.swapPath,
+                quoteToken,
+                ajnaToken,
+                flashToken0,
+                flashToken1,
+                flashFee
+            );
         }
-
-        uint256 quoteTokenAmount = quoteReceived / quoteTokenScale;
-        if (quoteTokenAmount == 0) revert InvalidQuoteAmount();
 
         _approveExact(quoteToken, swapRouter, quoteTokenAmount);
 
@@ -218,7 +238,15 @@ contract FlashArbExecutor is IUniswapV3FlashCallback {
     function _isCanonicalFactoryPool(address flashPool) internal view returns (bool) {
         (bool ok, address token0, address token1, uint24 fee) = _readPoolIdentity(flashPool);
         if (!ok) return false;
+        return _isCanonicalFactoryPool(flashPool, token0, token1, fee);
+    }
 
+    function _isCanonicalFactoryPool(
+        address flashPool,
+        address token0,
+        address token1,
+        uint24 fee
+    ) internal view returns (bool) {
         bytes32 salt = keccak256(abi.encode(token0, token1, fee));
         address expected = address(uint160(uint256(
             keccak256(
@@ -232,6 +260,66 @@ contract FlashArbExecutor is IUniswapV3FlashCallback {
         )));
 
         return expected == flashPool;
+    }
+
+    function _validateSwapPath(
+        bytes memory path,
+        address expectedInputToken,
+        address expectedOutputToken,
+        address flashToken0,
+        address flashToken1,
+        uint24 flashFee
+    ) internal pure {
+        if (path.length < 43 || (path.length - 20) % 23 != 0) revert InvalidSwapPath();
+
+        uint256 offset = 0;
+        address tokenIn = _readPathAddress(path, offset);
+        if (tokenIn != expectedInputToken) revert InvalidSwapPath();
+
+        while (offset + 20 < path.length) {
+            uint24 fee = _readPathFee(path, offset + 20);
+            address tokenOut = _readPathAddress(path, offset + 23);
+            if (_pathHopMatchesPool(tokenIn, tokenOut, fee, flashToken0, flashToken1, flashFee)) {
+                revert FlashPoolReuseInSwapPath();
+            }
+
+            tokenIn = tokenOut;
+            offset += 23;
+        }
+
+        if (tokenIn != expectedOutputToken) revert InvalidSwapPath();
+    }
+
+    function _pathHopMatchesPool(
+        address tokenA,
+        address tokenB,
+        uint24 fee,
+        address flashToken0,
+        address flashToken1,
+        uint24 flashFee
+    ) internal pure returns (bool) {
+        if (fee != flashFee) return false;
+        (address normalizedFlashToken0, address normalizedFlashToken1) =
+            flashToken0 < flashToken1
+                ? (flashToken0, flashToken1)
+                : (flashToken1, flashToken0);
+        (address token0, address token1) =
+            tokenA < tokenB ? (tokenA, tokenB) : (tokenB, tokenA);
+        return token0 == normalizedFlashToken0 && token1 == normalizedFlashToken1;
+    }
+
+    function _readPathAddress(bytes memory path, uint256 start) internal pure returns (address addr) {
+        if (path.length < start + 20) revert InvalidSwapPath();
+        assembly {
+            addr := shr(96, mload(add(add(path, 0x20), start)))
+        }
+    }
+
+    function _readPathFee(bytes memory path, uint256 start) internal pure returns (uint24 fee) {
+        if (path.length < start + 3) revert InvalidSwapPath();
+        assembly {
+            fee := shr(232, mload(add(add(path, 0x20), start)))
+        }
     }
 
     function _validateParams(ExecuteParams calldata params) internal pure {

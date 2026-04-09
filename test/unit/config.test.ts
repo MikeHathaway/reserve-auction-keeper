@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { loadConfig } from "../../src/config.js";
+import { BASE_CONFIG } from "../../src/chains/index.js";
 import { createCipheriv, scryptSync } from "node:crypto";
 import { writeFileSync, mkdirSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -11,6 +12,10 @@ const DEFAULT_PRIVATE_KEY = "0x" + "ab".repeat(32);
 const DEFAULT_FLASHBOTS_AUTH_KEY = "0x" + "cd".repeat(32);
 const KEYSTORE_PASSWORD = "correct horse battery staple";
 const TEST_SCRYPT_MAXMEM_BYTES = 512 * 1024 * 1024;
+
+function encodeUniswapV3Path(tokenIn: string, fee: number, tokenOut: string): `0x${string}` {
+  return `0x${tokenIn.slice(2)}${fee.toString(16).padStart(6, "0")}${tokenOut.slice(2)}` as `0x${string}`;
+}
 
 function writeConfig(config: object) {
   if (!existsSync(TMP_DIR)) mkdirSync(TMP_DIR, { recursive: true });
@@ -654,7 +659,11 @@ describe("config", () => {
               usdc: "0x2222222222222222222222222222222222222222",
             },
             quoteToAjnaPaths: {
-              usdc: "0x01020304",
+              usdc: encodeUniswapV3Path(
+                BASE_CONFIG.quoteTokens.USDC,
+                500,
+                BASE_CONFIG.ajnaToken,
+              ),
             },
           },
         },
@@ -666,6 +675,39 @@ describe("config", () => {
     expect(config.flashArb.routes.base?.flashLoanPools.USDC).toBe(
       "0x2222222222222222222222222222222222222222",
     );
-    expect(config.flashArb.routes.base?.quoteToAjnaPaths.USDC).toBe("0x01020304");
+    expect(config.flashArb.routes.base?.quoteToAjnaPaths.USDC).toBe(
+      encodeUniswapV3Path(BASE_CONFIG.quoteTokens.USDC, 500, BASE_CONFIG.ajnaToken),
+    );
+  });
+
+  it("rejects enabled flash-arb routes whose swap path does not start with the quote token or end with AJNA", () => {
+    writeConfig({
+      chains: {
+        base: { enabled: true, rpcUrl: "https://base-rpc.example.com" },
+      },
+      strategy: "flash-arb",
+      flashArb: {
+        routes: {
+          base: {
+            quoterAddress: "0x1111111111111111111111111111111111111111",
+            flashLoanPools: {
+              USDC: "0x2222222222222222222222222222222222222222",
+            },
+            quoteToAjnaPaths: {
+              USDC: encodeUniswapV3Path(
+                BASE_CONFIG.ajnaToken,
+                500,
+                BASE_CONFIG.quoteTokens.USDC,
+              ),
+            },
+          },
+        },
+      },
+      dryRun: true,
+    });
+
+    expect(() => loadConfig(CONFIG_FILE)).toThrow(
+      "flashArb.routes.base.quoteToAjnaPaths.USDC must encode a USDC -> AJNA route",
+    );
   });
 });

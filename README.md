@@ -210,6 +210,7 @@ Flash-arb borrows AJNA or bwAJNA from a configured Uniswap V3 pool, calls `takeR
 - reserve-auction kicks now use a conservative pre-kick EV estimate; for flash-arb, set `flashArb.minProfitUsd > 0` if you want the keeper to pay gas to start auctions
 - `flashArb.routes.<chain>.quoterAddress` and `quoteToAjnaPaths` provide executable Uniswap V3 quote-token → AJNA routes
 - `flashArb.routes.<chain>.flashLoanPools.<symbol>` selects the Uniswap V3 pool used for the AJNA flash borrow
+- `quoteToAjnaPaths.<symbol>` must start with that symbol's quote token, end with AJNA/bwAJNA, and avoid reusing the configured flash-loan pool anywhere in the path
 - `flashArb.routes.<chain>.executorAddress` or top-level `flashArb.executorAddress` must point at a deployed `FlashArbExecutor`
 - The runtime path is live, but you should still treat it as advanced/operator-only until fork tests exist for your target chains
 
@@ -247,7 +248,7 @@ If you already have a custom RPC URL for the target network, set `DEPLOY_RPC_URL
 | `flashArb.routes.<chain>.quoterAddress` | unset | Uniswap V3 quoter used for executable route quotes |
 | `flashArb.routes.<chain>.executorAddress` | unset | Chain-specific deployed `FlashArbExecutor` |
 | `flashArb.routes.<chain>.flashLoanPools.<symbol>` | unset | Uniswap V3 pool used to flash-borrow AJNA for that quote token |
-| `flashArb.routes.<chain>.quoteToAjnaPaths.<symbol>` | unset | Hex-encoded Uniswap V3 path from quote token to AJNA/bwAJNA |
+| `flashArb.routes.<chain>.quoteToAjnaPaths.<symbol>` | unset | Hex-encoded Uniswap V3 path from quote token to AJNA/bwAJNA. Must start with the quote token, end with AJNA/bwAJNA, and not reuse the configured flash-loan pool |
 | `profitMarginPercent` | `5` | Required profit margin above gas costs |
 | `gasPriceCeilingGwei` | `100` | Skip execution if gas exceeds this |
 | `polling.idleIntervalMs` | `60000` | Poll interval when no auction is near profitability |
@@ -267,6 +268,7 @@ If you already have a custom RPC URL for the target network, set `DEPLOY_RPC_URL
 - **Persist the Flashbots auth key.** `FLASHBOTS_AUTH_KEY_FILE` keeps a stable relay identity across restarts instead of generating a fresh one every boot.
 - **Base and other `private-rpc` chains fail closed without a private RPC URL.** Live submission is disabled instead of silently degrading to public mempool.
 - **Flash-arb requires a deployed executor contract.** The keeper will refuse live flash-arb mode if the chain route or executor address is missing.
+- **Flash-arb route topology is validated before execution.** The keeper rejects paths that do not decode to quote-token -> AJNA or that would reuse the configured flash-loan pool during callback execution.
 - **Flash-arb callback verification is factory-hardened.** The executor checks the callback sender against the configured Uniswap V3 factory and pool init code hash before repaying any flash loan.
 - **Gas ceiling.** The bot skips execution during gas spikes.
 - **Health check.** HTTP endpoint at `/health` (default port 8080) for monitoring.

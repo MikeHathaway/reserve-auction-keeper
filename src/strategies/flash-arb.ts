@@ -23,16 +23,12 @@ import {
 } from "../execution/settlement.js";
 import { logger } from "../utils/logger.js";
 import type { DexQuoter } from "../pricing/uniswap-v3.js";
-
-const UNISWAP_V3_POOL_ABI = [
-  {
-    inputs: [],
-    name: "fee",
-    outputs: [{ name: "", type: "uint24" }],
-    stateMutability: "view",
-    type: "function",
-  },
-] as const;
+import {
+  pathReusesUniswapV3Pool,
+  readUniswapV3PoolIdentity,
+  type UniswapV3PoolIdentity,
+  validateUniswapV3PathEndpoints,
+} from "../utils/uniswap-v3.js";
 
 const UNISWAP_FEE_DENOMINATOR = 1_000_000n;
 const SLIPPAGE_BPS_DENOMINATOR = 10_000n;
@@ -70,6 +66,12 @@ interface FlashArbCandidate {
 }
 
 type RouteContext = Pick<AuctionContext, "poolState" | "chainName"> | KickContext;
+type ResolvedRoute = {
+  executorAddress: Address;
+  flashPool: Address;
+  swapPath: Hex;
+  flashPoolIdentity: UniswapV3PoolIdentity;
+};
 
 export function createFlashArbStrategy(
   publicClient: PublicClient,
@@ -79,7 +81,7 @@ export function createFlashArbStrategy(
 ): ExecutionStrategy {
   const walletAddress = walletClient.account!.address;
   const warnedKeys = new Set<string>();
-  const flashPoolFeeCache = new Map<Address, bigint>();
+  const flashPoolIdentityCache = new Map<Address, Promise<UniswapV3PoolIdentity>>();
   let lastCandidate: { key: string; candidate: FlashArbCandidate | null } | null = null;
 
   function warnOnce(message: string, key: string, ctx: RouteContext) {
@@ -124,27 +126,22 @@ export function createFlashArbStrategy(
       SLIPPAGE_BPS_DENOMINATOR;
   }
 
-  async function getFlashPoolFeePpm(flashPool: Address): Promise<bigint> {
-    const cached = flashPoolFeeCache.get(flashPool);
-    if (cached !== undefined) {
+  async function getFlashPoolIdentity(flashPool: Address): Promise<UniswapV3PoolIdentity> {
+    const cached = flashPoolIdentityCache.get(flashPool);
+    if (cached) {
       return cached;
     }
 
-    const rawFee = await publicClient.readContract({
-      address: flashPool,
-      abi: UNISWAP_V3_POOL_ABI,
-      functionName: "fee",
-    });
-    const feePpm = typeof rawFee === "bigint" ? rawFee : BigInt(rawFee);
-    flashPoolFeeCache.set(flashPool, feePpm);
-    return feePpm;
+    const pendingIdentity = readUniswapV3PoolIdentity(publicClient, flashPool)
+      .catch((error) => {
+        flashPoolIdentityCache.delete(flashPool);
+        throw error;
+      });
+    flashPoolIdentityCache.set(flashPool, pendingIdentity);
+    return pendingIdentity;
   }
 
-  function resolveRoute(ctx: RouteContext): {
-    executorAddress: Address;
-    flashPool: Address;
-    swapPath: Hex;
-  } | null {
+  async function resolveRoute(ctx: RouteContext): Promise<ResolvedRoute | null> {
     if (!config.route) {
       warnOnce("Flash-arb route config missing for chain", `route:${ctx.chainName}`, ctx);
       return null;
@@ -176,7 +173,42 @@ export function createFlashArbStrategy(
       return null;
     }
 
-    return { executorAddress, flashPool, swapPath };
+    const pathError = validateUniswapV3PathEndpoints(
+      swapPath,
+      ctx.poolState.quoteToken,
+      config.ajnaToken,
+    );
+    if (pathError) {
+      warnOnce(
+        `Flash-arb swap path is not a valid quote-token -> AJNA route: ${pathError}`,
+        `pathTopology:${ctx.chainName}:${ctx.poolState.quoteTokenSymbol}`,
+        ctx,
+      );
+      return null;
+    }
+
+    let flashPoolIdentity: UniswapV3PoolIdentity;
+    try {
+      flashPoolIdentity = await getFlashPoolIdentity(flashPool);
+    } catch (error) {
+      warnOnce(
+        `Flash-arb flash pool could not be inspected: ${error instanceof Error ? error.message : String(error)}`,
+        `flashPoolIdentity:${ctx.chainName}:${ctx.poolState.quoteTokenSymbol}`,
+        ctx,
+      );
+      return null;
+    }
+
+    if (pathReusesUniswapV3Pool(swapPath, flashPoolIdentity)) {
+      warnOnce(
+        "Flash-arb swap path reuses the configured flash-loan pool and cannot execute during callback",
+        `flashPoolReuse:${ctx.chainName}:${ctx.poolState.quoteTokenSymbol}`,
+        ctx,
+      );
+      return null;
+    }
+
+    return { executorAddress, flashPool, swapPath, flashPoolIdentity };
   }
 
   async function evaluateCandidate(
@@ -192,7 +224,7 @@ export function createFlashArbStrategy(
       return null;
     }
 
-    const route = resolveRoute(ctx);
+    const route = await resolveRoute(ctx);
     if (!route) {
       lastCandidate = { key, candidate: null };
       return null;
@@ -251,7 +283,7 @@ export function createFlashArbStrategy(
       return null;
     }
 
-    const flashFeePpm = await getFlashPoolFeePpm(route.flashPool);
+    const flashFeePpm = route.flashPoolIdentity.fee;
     const repayAmount = borrowAmount + calculateFlashFee(borrowAmount, flashFeePpm);
     const minAjnaOut = applySlippageFloor(quote.amountOut);
 
@@ -424,7 +456,7 @@ export function createFlashArbStrategy(
     },
 
     async estimateKickProfit(ctx: KickContext): Promise<number> {
-      const route = resolveRoute(ctx);
+      const route = await resolveRoute(ctx);
       if (!route || !config.dexQuoter) return 0;
       if (config.minProfitUsd <= 0) return 0;
       if (ctx.prices.ajnaPriceUsd <= 0) return 0;
@@ -448,7 +480,7 @@ export function createFlashArbStrategy(
       if (!quote) return 0;
       if (quote.slippagePercent > config.maxSlippagePercent) return 0;
 
-      const flashFeePpm = await getFlashPoolFeePpm(route.flashPool);
+      const flashFeePpm = route.flashPoolIdentity.fee;
       const minAjnaOut = applySlippageFloor(quote.amountOut);
       const minAjnaOutFloat = Number(formatEther(minAjnaOut));
       const minProfitAjna = config.minProfitUsd / ctx.prices.ajnaPriceUsd;

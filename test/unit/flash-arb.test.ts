@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { parseEther } from "viem";
+import { parseEther, type Hex } from "viem";
 import { createFlashArbStrategy } from "../../src/strategies/flash-arb.js";
 import type { MevSubmitter } from "../../src/execution/mev-submitter.js";
 import { BASE_CONFIG } from "../../src/chains/index.js";
@@ -8,13 +8,26 @@ import type { AuctionContext } from "../../src/strategies/interface.js";
 const WALLET_ADDRESS = "0x3333333333333333333333333333333333333333";
 const EXECUTOR_ADDRESS = "0x4444444444444444444444444444444444444444";
 const FLASH_POOL_ADDRESS = "0x5555555555555555555555555555555555555555";
-const PATH = "0x01020304";
+const QUOTE_TOKEN_ADDRESS = "0x2222222222222222222222222222222222222222";
+const FLASH_POOL_FEE = 3000;
+const DISJOINT_SWAP_FEE = 500;
+
+function encodeUniswapV3Path(tokenIn: string, fee: number, tokenOut: string): Hex {
+  return `0x${tokenIn.slice(2)}${fee.toString(16).padStart(6, "0")}${tokenOut.slice(2)}` as Hex;
+}
+
+const PATH = encodeUniswapV3Path(QUOTE_TOKEN_ADDRESS, DISJOINT_SWAP_FEE, BASE_CONFIG.ajnaToken);
+const REUSED_FLASH_POOL_PATH = encodeUniswapV3Path(
+  QUOTE_TOKEN_ADDRESS,
+  FLASH_POOL_FEE,
+  BASE_CONFIG.ajnaToken,
+);
 
 function makeContext(overrides: Partial<AuctionContext> = {}): AuctionContext {
   return {
-    poolState: {
-      pool: "0x1111111111111111111111111111111111111111",
-      quoteToken: "0x2222222222222222222222222222222222222222",
+      poolState: {
+        pool: "0x1111111111111111111111111111111111111111",
+        quoteToken: QUOTE_TOKEN_ADDRESS,
       quoteTokenScale: 1_000_000_000_000n,
       quoteTokenSymbol: "USDC",
       reserves: parseEther("100"),
@@ -56,10 +69,17 @@ function makeStrategy({
   slippagePercent = 0.5,
   minLiquidityUsd = 10,
   minProfitUsd = 0.1,
+  swapPath = PATH,
 } = {}) {
+  const readContract = vi.fn(async ({ functionName }: { functionName: string }) => {
+    if (functionName === "token0") return QUOTE_TOKEN_ADDRESS;
+    if (functionName === "token1") return BASE_CONFIG.ajnaToken;
+    if (functionName === "fee") return BigInt(FLASH_POOL_FEE);
+    throw new Error(`Unexpected readContract function ${functionName}`);
+  });
   const publicClient = {
     chain: BASE_CONFIG.chain,
-    readContract: vi.fn().mockResolvedValue(3000n),
+    readContract,
     getBalance: vi.fn(),
     simulateContract: vi.fn().mockResolvedValue({}),
     waitForTransactionReceipt: vi.fn(),
@@ -95,7 +115,7 @@ function makeStrategy({
           USDC: FLASH_POOL_ADDRESS,
         },
         quoteToAjnaPaths: {
-          USDC: PATH,
+          USDC: swapPath,
         },
       },
       dexQuoter,
@@ -130,6 +150,13 @@ describe("flash-arb strategy", () => {
     await expect(strategy.canExecute(makeContext())).resolves.toBe(false);
   });
 
+  it("rejects candidates when the swap path reuses the configured flash-loan pool", async () => {
+    const { strategy, dexQuoter } = makeStrategy({ swapPath: REUSED_FLASH_POOL_PATH });
+
+    await expect(strategy.canExecute(makeContext())).resolves.toBe(false);
+    expect(dexQuoter.quoteQuoteToAjna).not.toHaveBeenCalled();
+  });
+
   it("simulates executor execution during dry runs", async () => {
     const { strategy, publicClient } = makeStrategy();
     const ctx = makeContext();
@@ -162,12 +189,20 @@ describe("flash-arb strategy", () => {
     vi.mocked(publicClient.getBalance)
       .mockResolvedValueOnce(parseEther("1"))
       .mockResolvedValueOnce(parseEther("0.99995"));
-    vi.mocked(publicClient.readContract)
-      .mockResolvedValueOnce(3000n)
-      .mockResolvedValueOnce(parseEther("5"))
-      .mockResolvedValueOnce(0n)
-      .mockResolvedValueOnce(parseEther("8"))
-      .mockResolvedValueOnce(0n);
+    let balanceReadCount = 0;
+    vi.mocked(publicClient.readContract).mockImplementation(async ({ functionName }: { functionName: string }) => {
+      if (functionName === "token0") return QUOTE_TOKEN_ADDRESS;
+      if (functionName === "token1") return BASE_CONFIG.ajnaToken;
+      if (functionName === "fee") return BigInt(FLASH_POOL_FEE);
+      if (functionName === "balanceOf") {
+        balanceReadCount += 1;
+        if (balanceReadCount === 1) return parseEther("5");
+        if (balanceReadCount === 2) return 0n;
+        if (balanceReadCount === 3) return parseEther("8");
+        if (balanceReadCount === 4) return 0n;
+      }
+      throw new Error(`Unexpected live readContract function ${functionName}`);
+    });
     vi.mocked(publicClient.waitForTransactionReceipt).mockResolvedValue({
       status: "success",
       blockNumber: 55n,

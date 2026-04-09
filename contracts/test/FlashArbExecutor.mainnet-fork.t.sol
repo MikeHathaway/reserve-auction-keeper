@@ -136,7 +136,9 @@ contract FlashArbExecutorMainnetForkTest is TestBase {
             profitRecipient: address(this)
         });
 
-        vm.expectRevert();
+        vm.expectRevert(
+            abi.encodeWithSelector(FlashArbExecutor.FlashPoolReuseInSwapPath.selector)
+        );
         executor.executeFlashArb(params);
     }
 
