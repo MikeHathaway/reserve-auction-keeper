@@ -1,9 +1,7 @@
 import "dotenv/config";
 import { spawnSync } from "node:child_process";
 
-const DEFAULT_UNISWAP_V3_SWAP_ROUTER = "0xE592427A0AEce92De3Edee1F18E0157C05861564";
-const DEFAULT_UNISWAP_V3_FACTORY = "0x1F98431c8aD98523631AE4a59f267346ea31F984";
-const DEFAULT_UNISWAP_V3_POOL_INIT_CODE_HASH =
+const STANDARD_UNISWAP_V3_POOL_INIT_CODE_HASH =
   "0xe34f199b19b2b4f47f68442619d555527d244f78a3297ea89325f843f87b8b54";
 const SUPPORTED_EXECUTOR_KINDS = ["v3v3", "v2v3", "v3v2"];
 
@@ -13,30 +11,75 @@ const CHAIN_PRESETS = {
     explicitRpcEnv: "MAINNET_RPC_URL",
     alchemySlug: "eth-mainnet",
     infuraSlug: "mainnet",
+    uniswapV2: {
+      factory: "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f",
+      swapRouter: "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D",
+    },
+    uniswapV3: {
+      factory: "0x1F98431c8aD98523631AE4a59f267346ea31F984",
+      poolInitCodeHash: STANDARD_UNISWAP_V3_POOL_INIT_CODE_HASH,
+      swapRouter: "0xE592427A0AEce92De3Edee1F18E0157C05861564",
+    },
   },
   base: {
     ajnaToken: "0xf0f326af3b1Ed943ab95C29470730CC8Cf66ae47",
     explicitRpcEnv: "BASE_RPC_URL",
     alchemySlug: "base-mainnet",
     infuraSlug: null,
+    uniswapV2: {
+      factory: "0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6",
+      swapRouter: "0x4752ba5Dbc23f44D87826276BF6fd6b1C372aD24",
+    },
+    uniswapV3: {
+      factory: "0x33128a8fC17869897dcE68Ed026d694621f6FDfD",
+      poolInitCodeHash: STANDARD_UNISWAP_V3_POOL_INIT_CODE_HASH,
+      swapRouter: "0x2626664c2603336E57B271c5C0b26F421741e481",
+    },
   },
   arbitrum: {
     ajnaToken: "0xA98c94d67D9dF259Bee2E7b519dF75aB00E3E2A8",
     explicitRpcEnv: "ARBITRUM_RPC_URL",
     alchemySlug: "arb-mainnet",
     infuraSlug: "arbitrum-mainnet",
+    uniswapV2: {
+      factory: "0xf1D7CC64Fb4452F05c498126312eBE29f30Fbcf9",
+      swapRouter: "0x4752ba5Dbc23f44D87826276BF6fd6b1C372aD24",
+    },
+    uniswapV3: {
+      factory: "0x1F98431c8aD98523631AE4a59f267346ea31F984",
+      poolInitCodeHash: STANDARD_UNISWAP_V3_POOL_INIT_CODE_HASH,
+      swapRouter: "0xE592427A0AEce92De3Edee1F18E0157C05861564",
+    },
   },
   optimism: {
     ajnaToken: "0x6c518f9D1a163379235816c543E62922a79863Fa",
     explicitRpcEnv: "OPTIMISM_RPC_URL",
     alchemySlug: "opt-mainnet",
     infuraSlug: "optimism-mainnet",
+    uniswapV2: {
+      factory: "0x0c3c1c532F1e39EdF36BE9Fe0bE1410313E074Bf",
+      swapRouter: "0x4A7b5Da61326A6379179b40d00F57E5bbDC962c2",
+    },
+    uniswapV3: {
+      factory: "0x1F98431c8aD98523631AE4a59f267346ea31F984",
+      poolInitCodeHash: STANDARD_UNISWAP_V3_POOL_INIT_CODE_HASH,
+      swapRouter: "0xE592427A0AEce92De3Edee1F18E0157C05861564",
+    },
   },
   polygon: {
     ajnaToken: "0xA63b19647787Da652D0826424460D1BBf43Bf9c6",
     explicitRpcEnv: "POLYGON_RPC_URL",
     alchemySlug: "polygon-mainnet",
     infuraSlug: "polygon-mainnet",
+    uniswapV2: {
+      factory: "0x9e5A52f57b3038F1B8EeE45F28b3C1967e22799C",
+      swapRouter: "0xedf6066A2b290C185783862C7F4776A2C8077AD1",
+    },
+    uniswapV3: {
+      factory: "0x1F98431c8aD98523631AE4a59f267346ea31F984",
+      poolInitCodeHash: STANDARD_UNISWAP_V3_POOL_INIT_CODE_HASH,
+      swapRouter: "0xE592427A0AEce92De3Edee1F18E0157C05861564",
+    },
   },
 };
 
@@ -109,9 +152,8 @@ const ajnaToken = requireHex(
   process.env.FLASH_ARB_EXECUTOR_AJNA_TOKEN || preset?.ajnaToken,
   40,
 );
-const defaultSwapRouter = executorKind === "v3v2"
-  ? process.env.FLASH_ARB_EXECUTOR_SWAP_ROUTER
-  : (process.env.FLASH_ARB_EXECUTOR_SWAP_ROUTER || DEFAULT_UNISWAP_V3_SWAP_ROUTER);
+const defaultSwapRouter = process.env.FLASH_ARB_EXECUTOR_SWAP_ROUTER ||
+  (executorKind === "v3v2" ? preset?.uniswapV2?.swapRouter : preset?.uniswapV3?.swapRouter);
 const swapRouter = requireHex(
   "FLASH_ARB_EXECUTOR_SWAP_ROUTER",
   defaultSwapRouter,
@@ -155,7 +197,7 @@ let deploymentDetails = {
 if (executorKind === "v2v3") {
   const uniswapV2Factory = requireHex(
     "FLASH_ARB_EXECUTOR_UNISWAP_V2_FACTORY",
-    process.env.FLASH_ARB_EXECUTOR_UNISWAP_V2_FACTORY,
+    process.env.FLASH_ARB_EXECUTOR_UNISWAP_V2_FACTORY || preset?.uniswapV2?.factory,
     40,
   );
   env.FLASH_ARB_EXECUTOR_UNISWAP_V2_FACTORY = uniswapV2Factory;
@@ -166,12 +208,14 @@ if (executorKind === "v2v3") {
 } else {
   const uniswapV3Factory = requireHex(
     "FLASH_ARB_EXECUTOR_UNISWAP_V3_FACTORY",
-    process.env.FLASH_ARB_EXECUTOR_UNISWAP_V3_FACTORY || DEFAULT_UNISWAP_V3_FACTORY,
+    process.env.FLASH_ARB_EXECUTOR_UNISWAP_V3_FACTORY || preset?.uniswapV3?.factory,
     40,
   );
   const uniswapV3PoolInitCodeHash = requireHex(
     "FLASH_ARB_EXECUTOR_UNISWAP_V3_POOL_INIT_CODE_HASH",
-    process.env.FLASH_ARB_EXECUTOR_UNISWAP_V3_POOL_INIT_CODE_HASH || DEFAULT_UNISWAP_V3_POOL_INIT_CODE_HASH,
+    process.env.FLASH_ARB_EXECUTOR_UNISWAP_V3_POOL_INIT_CODE_HASH ||
+      preset?.uniswapV3?.poolInitCodeHash ||
+      STANDARD_UNISWAP_V3_POOL_INIT_CODE_HASH,
     64,
   );
   env.FLASH_ARB_EXECUTOR_UNISWAP_V3_FACTORY = uniswapV3Factory;

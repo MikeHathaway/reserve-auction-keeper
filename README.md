@@ -260,7 +260,7 @@ Set `FLASH_ARB_EXECUTOR_KIND` to choose the family:
 - `v2v3`
 - `v3v2`
 
-The wrapper fills `FLASH_ARB_EXECUTOR_AJNA_TOKEN` from the built-in chain preset for `mainnet`, `base`, `arbitrum`, `optimism`, or `polygon`, resolves the RPC URL from `DEPLOY_RPC_URL` or `RPC_PROVIDER` + `RPC_API_KEY`, and applies the family-specific constructor inputs. Override any constructor input with:
+The wrapper fills `FLASH_ARB_EXECUTOR_AJNA_TOKEN` plus the family-specific Uniswap router/factory defaults from the built-in chain preset for `mainnet`, `base`, `arbitrum`, `optimism`, or `polygon`, resolves the RPC URL from `DEPLOY_RPC_URL` or `RPC_PROVIDER` + `RPC_API_KEY`, and applies the family-specific constructor inputs. Override any constructor input with:
 
 - `FLASH_ARB_EXECUTOR_KIND`
 - `FLASH_ARB_EXECUTOR_AJNA_TOKEN`
