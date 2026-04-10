@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-import {FlashArbExecutor, IAjnaPoolLike} from "../FlashArbExecutor.sol";
+import {FlashArbExecutor, IAjnaPoolLike, IERC20Like} from "../FlashArbExecutor.sol";
+import {FlashArbExecutorV3V2} from "../FlashArbExecutorV3V2.sol";
 import {TestBase} from "./TestBase.sol";
 import {MockUniswapV3Factory} from "./mocks/MockUniswapV3Factory.sol";
 import {MockUniswapV3Pool} from "./mocks/MockUniswapV3Pool.sol";
@@ -50,6 +51,8 @@ contract FlashArbExecutorMainnetForkTest is TestBase {
         0x1F98431c8aD98523631AE4a59f267346ea31F984;
     address internal constant MAINNET_UNISWAP_V3_ROUTER =
         0xE592427A0AEce92De3Edee1F18E0157C05861564;
+    address internal constant MAINNET_UNISWAP_V2_ROUTER =
+        0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D;
     address internal constant MAINNET_UNISWAP_V3_QUOTER =
         0x61fFE014bA17989E743c5F6cB21bF9697530B21e;
     bytes32 internal constant MAINNET_UNISWAP_V3_POOL_INIT_CODE_HASH =
@@ -140,6 +143,38 @@ contract FlashArbExecutorMainnetForkTest is TestBase {
             abi.encodeWithSelector(FlashArbExecutor.FlashPoolReuseInSwapPath.selector)
         );
         executor.executeFlashArb(params);
+    }
+
+    function test_mainnetPinnedForkV3V2FlashArbExecutesThroughDistinctV2SwapRoute() public {
+        vm.warp(PINNED_FORK_BLOCK_TIMESTAMP);
+
+        IAjnaReservePoolLike reservePool = _selectKickableUsdcReservePool();
+        FlashArbExecutorV3V2 executor = new FlashArbExecutorV3V2(
+            MAINNET_AJNA,
+            MAINNET_UNISWAP_V2_ROUTER,
+            MAINNET_UNISWAP_V3_FACTORY,
+            MAINNET_UNISWAP_V3_POOL_INIT_CODE_HASH
+        );
+
+        assertEq(
+            reservePool.quoteTokenAddress(),
+            MAINNET_USDC,
+            "fixture should be the pinned USDC reserve-auction pool"
+        );
+
+        uint256 flashPoolAjnaBefore = IERC20Like(MAINNET_AJNA).balanceOf(MAINNET_AJNA_WETH_10000_POOL);
+        uint256 profitRecipientBefore = IERC20Like(MAINNET_AJNA).balanceOf(address(this));
+
+        bool executed = _tryExecutePinnedV3V2FlashArb(reservePool, executor);
+        assertTrue(executed, "expected at least one executable v3->v2 flash-arb configuration");
+        assertTrue(
+            IERC20Like(MAINNET_AJNA).balanceOf(MAINNET_AJNA_WETH_10000_POOL) > flashPoolAjnaBefore,
+            "flash pool should accrue AJNA fee"
+        );
+        assertTrue(
+            IERC20Like(MAINNET_AJNA).balanceOf(address(this)) > profitRecipientBefore,
+            "profit recipient should receive AJNA profit"
+        );
     }
 
     function _assertPinnedUsdcRouteTopology() internal view {
@@ -247,6 +282,71 @@ contract FlashArbExecutorMainnetForkTest is TestBase {
         }
 
         revert("no kickable pinned USDC reserve-auction pool found");
+    }
+
+    function _tryExecutePinnedV3V2FlashArb(
+        IAjnaReservePoolLike reservePool,
+        FlashArbExecutorV3V2 executor
+    ) internal returns (bool) {
+        IPoolInfoUtilsLike poolInfoUtils = IPoolInfoUtilsLike(MAINNET_POOL_INFO_UTILS);
+        uint256 quoteTokenScale = reservePool.quoteTokenScale();
+        (, , uint256 claimableAfterKick, , uint256 timeRemainingAfterKick) =
+            poolInfoUtils.poolReservesInfo(address(reservePool));
+        uint256 availableRawQuote = claimableAfterKick / quoteTokenScale;
+        uint256 takeQuoteTokenRaw =
+            availableRawQuote < TARGET_TAKE_QUOTE_TOKEN_RAW
+                ? availableRawQuote
+                : TARGET_TAKE_QUOTE_TOKEN_RAW;
+        assertTrue(takeQuoteTokenRaw > 0, "pinned reserve auction should have claimable USDC");
+        assertTrue(
+            timeRemainingAfterKick > 1,
+            "kicked reserve auction should still have time remaining"
+        );
+
+        vm.warp(PINNED_FORK_BLOCK_TIMESTAMP + timeRemainingAfterKick - 1);
+
+        (, , , uint256 auctionPrice, uint256 timeRemainingNearExpiry) =
+            poolInfoUtils.poolReservesInfo(address(reservePool));
+        assertTrue(timeRemainingNearExpiry > 0, "auction should still be live near expiry");
+
+        while (takeQuoteTokenRaw > 0) {
+            try executor.executeFlashArb(
+                _buildPinnedV3V2Params(
+                    address(reservePool),
+                    takeQuoteTokenRaw * quoteTokenScale,
+                    auctionPrice
+                )
+            ) {
+                return true;
+            } catch {
+                takeQuoteTokenRaw /= 2;
+            }
+        }
+
+        return false;
+    }
+
+    function _buildPinnedV3V2Params(
+        address reservePool,
+        uint256 takeAmount,
+        uint256 auctionPrice
+    ) internal view returns (FlashArbExecutorV3V2.ExecuteParams memory params) {
+        params = FlashArbExecutorV3V2.ExecuteParams({
+            flashPool: MAINNET_AJNA_WETH_10000_POOL,
+            ajnaPool: reservePool,
+            borrowAmount: _ceilWadMul(takeAmount, auctionPrice),
+            quoteAmount: takeAmount,
+            swapPath: _mainnetV2SwapPath(),
+            minAjnaOut: 0,
+            profitRecipient: address(this)
+        });
+    }
+
+    function _mainnetV2SwapPath() internal pure returns (address[] memory path) {
+        path = new address[](3);
+        path[0] = MAINNET_USDC;
+        path[1] = MAINNET_WETH;
+        path[2] = MAINNET_AJNA;
     }
 
     function _ceilWadMul(uint256 left, uint256 right) internal pure returns (uint256) {

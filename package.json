@@ -16,6 +16,7 @@
     "test": "vitest run",
     "test:integration:mainnet": "vitest run --config vitest.integration.config.ts",
     "test:contracts": "node scripts/run-contract-tests.mjs",
+    "test:contracts:fork:base": "node scripts/run-base-fork-tests.mjs",
     "test:contracts:fork:mainnet": "node scripts/run-mainnet-fork-tests.mjs",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"

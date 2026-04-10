@@ -16,6 +16,7 @@ function collectContractTests(dir) {
     }
     if (!entry.name.endsWith(".t.sol")) continue;
     if (entry.name.endsWith(".mainnet-fork.t.sol")) continue;
+    if (entry.name.endsWith(".base-fork.t.sol")) continue;
     files.push(fullPath);
   }
 
