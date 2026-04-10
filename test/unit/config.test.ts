@@ -636,11 +636,27 @@ describe("config", () => {
     });
     expect(config.flashArb.routes.base).toEqual({
       quoterAddress: "0x1111111111111111111111111111111111111111",
-      flashLoanPools: {
-        USDC: "0x2222222222222222222222222222222222222222",
+      uniswapV2FactoryAddress: undefined,
+      executors: {
+        v3v3: "0x1234567890123456789012345678901234567890",
+        v2v3: undefined,
+        v3v2: undefined,
       },
-      quoteToAjnaPaths: {
-        USDC: "0x01020304",
+      sources: {
+        USDC: [
+          {
+            protocol: "uniswap-v3",
+            address: "0x2222222222222222222222222222222222222222",
+          },
+        ],
+      },
+      swapRoutes: {
+        USDC: [
+          {
+            protocol: "uniswap-v3",
+            path: "0x01020304",
+          },
+        ],
       },
     });
   });
@@ -652,6 +668,7 @@ describe("config", () => {
       },
       strategy: "flash-arb",
       flashArb: {
+        executorAddress: "0x1234567890123456789012345678901234567890",
         routes: {
           base: {
             quoterAddress: "0x1111111111111111111111111111111111111111",
@@ -672,12 +689,18 @@ describe("config", () => {
     });
 
     const config = loadConfig(CONFIG_FILE);
-    expect(config.flashArb.routes.base?.flashLoanPools.USDC).toBe(
-      "0x2222222222222222222222222222222222222222",
-    );
-    expect(config.flashArb.routes.base?.quoteToAjnaPaths.USDC).toBe(
-      encodeUniswapV3Path(BASE_CONFIG.quoteTokens.USDC, 500, BASE_CONFIG.ajnaToken),
-    );
+    expect(config.flashArb.routes.base?.sources.USDC).toEqual([
+      {
+        protocol: "uniswap-v3",
+        address: "0x2222222222222222222222222222222222222222",
+      },
+    ]);
+    expect(config.flashArb.routes.base?.swapRoutes.USDC).toEqual([
+      {
+        protocol: "uniswap-v3",
+        path: encodeUniswapV3Path(BASE_CONFIG.quoteTokens.USDC, 500, BASE_CONFIG.ajnaToken),
+      },
+    ]);
   });
 
   it("rejects enabled flash-arb routes whose swap path does not start with the quote token or end with AJNA", () => {
@@ -707,7 +730,7 @@ describe("config", () => {
     });
 
     expect(() => loadConfig(CONFIG_FILE)).toThrow(
-      "flashArb.routes.base.quoteToAjnaPaths.USDC must encode a USDC -> AJNA route",
+      "flashArb.routes.base.swapRoutes.USDC must encode a USDC -> AJNA route",
     );
   });
 });

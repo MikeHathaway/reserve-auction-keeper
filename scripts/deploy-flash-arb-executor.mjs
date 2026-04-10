@@ -5,6 +5,7 @@ const DEFAULT_UNISWAP_V3_SWAP_ROUTER = "0xE592427A0AEce92De3Edee1F18E0157C058615
 const DEFAULT_UNISWAP_V3_FACTORY = "0x1F98431c8aD98523631AE4a59f267346ea31F984";
 const DEFAULT_UNISWAP_V3_POOL_INIT_CODE_HASH =
   "0xe34f199b19b2b4f47f68442619d555527d244f78a3297ea89325f843f87b8b54";
+const SUPPORTED_EXECUTOR_KINDS = ["v3v3", "v2v3", "v3v2"];
 
 const CHAIN_PRESETS = {
   mainnet: {
@@ -96,60 +97,99 @@ function requireHex(name, value, expectedLength) {
 
 const chainName = resolveChain();
 const preset = chainName ? CHAIN_PRESETS[chainName] : null;
+const executorKind = (process.env.FLASH_ARB_EXECUTOR_KIND?.trim().toLowerCase() || "v3v3");
+if (!SUPPORTED_EXECUTOR_KINDS.includes(executorKind)) {
+  throw new Error(
+    `Unsupported FLASH_ARB_EXECUTOR_KIND "${executorKind}". Expected one of: ${SUPPORTED_EXECUTOR_KINDS.join(", ")}`,
+  );
+}
 
 const ajnaToken = requireHex(
   "FLASH_ARB_EXECUTOR_AJNA_TOKEN",
   process.env.FLASH_ARB_EXECUTOR_AJNA_TOKEN || preset?.ajnaToken,
   40,
 );
+const defaultSwapRouter = executorKind === "v3v2"
+  ? process.env.FLASH_ARB_EXECUTOR_SWAP_ROUTER
+  : (process.env.FLASH_ARB_EXECUTOR_SWAP_ROUTER || DEFAULT_UNISWAP_V3_SWAP_ROUTER);
 const swapRouter = requireHex(
   "FLASH_ARB_EXECUTOR_SWAP_ROUTER",
-  process.env.FLASH_ARB_EXECUTOR_SWAP_ROUTER || DEFAULT_UNISWAP_V3_SWAP_ROUTER,
+  defaultSwapRouter,
   40,
-);
-const uniswapV3Factory = requireHex(
-  "FLASH_ARB_EXECUTOR_UNISWAP_V3_FACTORY",
-  process.env.FLASH_ARB_EXECUTOR_UNISWAP_V3_FACTORY || DEFAULT_UNISWAP_V3_FACTORY,
-  40,
-);
-const uniswapV3PoolInitCodeHash = requireHex(
-  "FLASH_ARB_EXECUTOR_UNISWAP_V3_POOL_INIT_CODE_HASH",
-  process.env.FLASH_ARB_EXECUTOR_UNISWAP_V3_POOL_INIT_CODE_HASH || DEFAULT_UNISWAP_V3_POOL_INIT_CODE_HASH,
-  64,
 );
 const rpcUrl = resolveRpcUrl(chainName, preset);
 
+const scriptTarget = executorKind === "v2v3"
+  ? "script/DeployFlashArbExecutorV2V3.s.sol:DeployFlashArbExecutorV2V3Script"
+  : executorKind === "v3v2"
+  ? "script/DeployFlashArbExecutorV3V2.s.sol:DeployFlashArbExecutorV3V2Script"
+  : "script/DeployFlashArbExecutor.s.sol:DeployFlashArbExecutorScript";
+
 const forgeArgs = [
   "script",
-  "script/DeployFlashArbExecutor.s.sol:DeployFlashArbExecutorScript",
+  scriptTarget,
   "--rpc-url",
   rpcUrl,
   ...process.argv.slice(2),
 ];
 
-console.error("Preparing FlashArbExecutor deployment", {
+const env = {
+  ...process.env,
+  FLASH_ARB_EXECUTOR_AJNA_TOKEN: ajnaToken,
+  FLASH_ARB_EXECUTOR_SWAP_ROUTER: swapRouter,
+};
+
+let deploymentDetails = {
   chain: chainName ?? "custom",
+  executorKind,
   ajnaToken,
   swapRouter,
-  uniswapV3Factory,
-  uniswapV3PoolInitCodeHash,
   rpcUrlSource: process.env.DEPLOY_RPC_URL
     ? "DEPLOY_RPC_URL"
     : preset?.explicitRpcEnv && process.env[preset.explicitRpcEnv]
     ? preset.explicitRpcEnv
     : "RPC_PROVIDER/RPC_API_KEY",
   forgeArgs,
+};
+
+if (executorKind === "v2v3") {
+  const uniswapV2Factory = requireHex(
+    "FLASH_ARB_EXECUTOR_UNISWAP_V2_FACTORY",
+    process.env.FLASH_ARB_EXECUTOR_UNISWAP_V2_FACTORY,
+    40,
+  );
+  env.FLASH_ARB_EXECUTOR_UNISWAP_V2_FACTORY = uniswapV2Factory;
+  deploymentDetails = {
+    ...deploymentDetails,
+    uniswapV2Factory,
+  };
+} else {
+  const uniswapV3Factory = requireHex(
+    "FLASH_ARB_EXECUTOR_UNISWAP_V3_FACTORY",
+    process.env.FLASH_ARB_EXECUTOR_UNISWAP_V3_FACTORY || DEFAULT_UNISWAP_V3_FACTORY,
+    40,
+  );
+  const uniswapV3PoolInitCodeHash = requireHex(
+    "FLASH_ARB_EXECUTOR_UNISWAP_V3_POOL_INIT_CODE_HASH",
+    process.env.FLASH_ARB_EXECUTOR_UNISWAP_V3_POOL_INIT_CODE_HASH || DEFAULT_UNISWAP_V3_POOL_INIT_CODE_HASH,
+    64,
+  );
+  env.FLASH_ARB_EXECUTOR_UNISWAP_V3_FACTORY = uniswapV3Factory;
+  env.FLASH_ARB_EXECUTOR_UNISWAP_V3_POOL_INIT_CODE_HASH = uniswapV3PoolInitCodeHash;
+  deploymentDetails = {
+    ...deploymentDetails,
+    uniswapV3Factory,
+    uniswapV3PoolInitCodeHash,
+  };
+}
+
+console.error("Preparing FlashArbExecutor deployment", {
+  ...deploymentDetails,
 });
 
 const result = spawnSync("forge", forgeArgs, {
   stdio: "inherit",
-  env: {
-    ...process.env,
-    FLASH_ARB_EXECUTOR_AJNA_TOKEN: ajnaToken,
-    FLASH_ARB_EXECUTOR_SWAP_ROUTER: swapRouter,
-    FLASH_ARB_EXECUTOR_UNISWAP_V3_FACTORY: uniswapV3Factory,
-    FLASH_ARB_EXECUTOR_UNISWAP_V3_POOL_INIT_CODE_HASH: uniswapV3PoolInitCodeHash,
-  },
+  env,
 });
 
 process.exit(result.status ?? 1);

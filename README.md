@@ -93,12 +93,38 @@ FLASHBOTS_AUTH_KEY_FILE=./secrets/flashbots-auth.key
     "routes": {
       "base": {
         "quoterAddress": "0x0000000000000000000000000000000000000000",
-        "executorAddress": "0x0000000000000000000000000000000000000000",
-        "flashLoanPools": {
-          "USDC": "0x0000000000000000000000000000000000000000"
+        "uniswapV2FactoryAddress": "0x0000000000000000000000000000000000000000",
+        "executors": {
+          "v2v3": "0x0000000000000000000000000000000000000000",
+          "v3v2": "0x0000000000000000000000000000000000000000",
+          "v3v3": "0x0000000000000000000000000000000000000000"
         },
-        "quoteToAjnaPaths": {
-          "USDC": "0x"
+        "sources": {
+          "USDC": [
+            {
+              "protocol": "uniswap-v2",
+              "address": "0x0000000000000000000000000000000000000000"
+            },
+            {
+              "protocol": "uniswap-v3",
+              "address": "0x0000000000000000000000000000000000000000"
+            }
+          ]
+        },
+        "swapRoutes": {
+          "USDC": [
+            {
+              "protocol": "uniswap-v3",
+              "path": "0x"
+            },
+            {
+              "protocol": "uniswap-v2",
+              "path": [
+                "0x0000000000000000000000000000000000000001",
+                "0x0000000000000000000000000000000000000002"
+              ]
+            }
+          ]
         }
       }
     }
@@ -203,15 +229,22 @@ For AJNA holders who want to exit their position into quote tokens at a specific
 
 ### Strategy: Flash-Arb
 
-Flash-arb borrows AJNA or bwAJNA from a configured Uniswap V3 pool, calls `takeReserves()`, swaps the received quote token back to AJNA, repays the flash loan, and keeps the spread.
+Flash-arb now supports multiple execution families and chooses the best executable candidate offchain before submitting onchain:
 
-- `strategy: "flash-arb"` now uses the on-chain `FlashArbExecutor` contract path
+- `v3v3`: Uniswap V3 flash source -> Ajna `takeReserves()` -> Uniswap V3 swap
+- `v2v3`: Uniswap V2 flash source -> Ajna `takeReserves()` -> Uniswap V3 swap
+- `v3v2`: Uniswap V3 flash source -> Ajna `takeReserves()` -> Uniswap V2 swap
+
+- `strategy: "flash-arb"` uses the matching on-chain executor contract for the selected family
 - `flashArb.maxSlippagePercent`, `flashArb.minLiquidityUsd`, and `flashArb.minProfitUsd` gate candidate selection before execution
 - reserve-auction kicks now use a conservative pre-kick EV estimate; for flash-arb, set `flashArb.minProfitUsd > 0` if you want the keeper to pay gas to start auctions
-- `flashArb.routes.<chain>.quoterAddress` and `quoteToAjnaPaths` provide executable Uniswap V3 quote-token → AJNA routes
-- `flashArb.routes.<chain>.flashLoanPools.<symbol>` selects the Uniswap V3 pool used for the AJNA flash borrow
-- `quoteToAjnaPaths.<symbol>` must start with that symbol's quote token, end with AJNA/bwAJNA, and avoid reusing the configured flash-loan pool anywhere in the path
-- `flashArb.routes.<chain>.executorAddress` or top-level `flashArb.executorAddress` must point at a deployed `FlashArbExecutor`
+- `flashArb.routes.<chain>.sources.<symbol>[]` declares AJNA-containing flash sources, each tagged as `uniswap-v2` or `uniswap-v3`
+- `flashArb.routes.<chain>.swapRoutes.<symbol>[]` declares quote-token -> AJNA swap routes, each tagged as `uniswap-v2` or `uniswap-v3`
+- `flashArb.routes.<chain>.executors` maps executor family -> deployed executor address
+- `flashArb.routes.<chain>.quoterAddress` is required for any `uniswap-v3` swap route
+- `flashArb.routes.<chain>.uniswapV2FactoryAddress` is required for any `uniswap-v2` swap route
+- `uniswap-v3` swap routes must start with the quote token, end with AJNA/bwAJNA, and avoid reusing a `uniswap-v3` flash source in the same candidate
+- legacy `flashLoanPools`, `quoteToAjnaPaths`, and top-level/default `executorAddress` still normalize into the `v3v3` family so existing configs keep working
 - The runtime path is live, but you should still treat it as advanced/operator-only until fork tests exist for your target chains
 
 Deploy the executor with:
@@ -221,10 +254,18 @@ DEPLOY_CHAIN=base npm run deploy:flash-arb-executor
 DEPLOY_CHAIN=base npm run deploy:flash-arb-executor -- --broadcast --private-key "$DEPLOYER_PRIVATE_KEY"
 ```
 
-The wrapper fills `FLASH_ARB_EXECUTOR_AJNA_TOKEN` from the built-in chain preset for `mainnet`, `base`, `arbitrum`, `optimism`, or `polygon`, resolves the RPC URL from `DEPLOY_RPC_URL` or `RPC_PROVIDER` + `RPC_API_KEY`, and defaults the Uniswap V3 router/factory/init-code-hash to the standard deployment values. Override any constructor input with:
+Set `FLASH_ARB_EXECUTOR_KIND` to choose the family:
 
+- `v3v3` (default)
+- `v2v3`
+- `v3v2`
+
+The wrapper fills `FLASH_ARB_EXECUTOR_AJNA_TOKEN` from the built-in chain preset for `mainnet`, `base`, `arbitrum`, `optimism`, or `polygon`, resolves the RPC URL from `DEPLOY_RPC_URL` or `RPC_PROVIDER` + `RPC_API_KEY`, and applies the family-specific constructor inputs. Override any constructor input with:
+
+- `FLASH_ARB_EXECUTOR_KIND`
 - `FLASH_ARB_EXECUTOR_AJNA_TOKEN`
 - `FLASH_ARB_EXECUTOR_SWAP_ROUTER`
+- `FLASH_ARB_EXECUTOR_UNISWAP_V2_FACTORY`
 - `FLASH_ARB_EXECUTOR_UNISWAP_V3_FACTORY`
 - `FLASH_ARB_EXECUTOR_UNISWAP_V3_POOL_INIT_CODE_HASH`
 
@@ -244,11 +285,14 @@ If you already have a custom RPC URL for the target network, set `DEPLOY_RPC_URL
 | `flashArb.maxSlippagePercent` | `1` | Slippage tolerance applied to quoted AJNA output before execution |
 | `flashArb.minLiquidityUsd` | `100` | Minimum quote-token liquidity required before evaluating a flash-arb |
 | `flashArb.minProfitUsd` | `0` | Minimum conservative USD profit after flash fee + slippage floor. Set above `0` to allow flash-arb reserve-auction kicks under the conservative pre-kick EV gate |
-| `flashArb.executorAddress` | unset | Optional default executor address used when a chain route does not override it |
-| `flashArb.routes.<chain>.quoterAddress` | unset | Uniswap V3 quoter used for executable route quotes |
-| `flashArb.routes.<chain>.executorAddress` | unset | Chain-specific deployed `FlashArbExecutor` |
-| `flashArb.routes.<chain>.flashLoanPools.<symbol>` | unset | Uniswap V3 pool used to flash-borrow AJNA for that quote token |
-| `flashArb.routes.<chain>.quoteToAjnaPaths.<symbol>` | unset | Hex-encoded Uniswap V3 path from quote token to AJNA/bwAJNA. Must start with the quote token, end with AJNA/bwAJNA, and not reuse the configured flash-loan pool |
+| `flashArb.executorAddress` | unset | Optional legacy/default `v3v3` executor address used when a chain route does not override it |
+| `flashArb.routes.<chain>.quoterAddress` | unset | Uniswap V3 quoter used for executable `uniswap-v3` swap routes |
+| `flashArb.routes.<chain>.uniswapV2FactoryAddress` | unset | Uniswap V2 factory used for executable `uniswap-v2` swap routes |
+| `flashArb.routes.<chain>.executors.v3v3` | unset | Deployed executor for `v3v3` routes |
+| `flashArb.routes.<chain>.executors.v2v3` | unset | Deployed executor for `v2v3` routes |
+| `flashArb.routes.<chain>.executors.v3v2` | unset | Deployed executor for `v3v2` routes |
+| `flashArb.routes.<chain>.sources.<symbol>[]` | unset | Flash sources for that quote token, each with `{ protocol, address }` |
+| `flashArb.routes.<chain>.swapRoutes.<symbol>[]` | unset | Swap routes for that quote token, each with either `{ protocol: "uniswap-v3", path: "0x..." }` or `{ protocol: "uniswap-v2", path: ["tokenIn", "...", "ajna"] }` |
 | `profitMarginPercent` | `5` | Required profit margin above gas costs |
 | `gasPriceCeilingGwei` | `100` | Skip execution if gas exceeds this |
 | `polling.idleIntervalMs` | `60000` | Poll interval when no auction is near profitability |
@@ -267,9 +311,9 @@ If you already have a custom RPC URL for the target network, set `DEPLOY_RPC_URL
 - **Mainnet live mode uses single-tx Flashbots bundles.** The keeper prepares, signs, simulates, and submits a raw bundle, then retries across up to 3 target blocks.
 - **Persist the Flashbots auth key.** `FLASHBOTS_AUTH_KEY_FILE` keeps a stable relay identity across restarts instead of generating a fresh one every boot.
 - **Base and other `private-rpc` chains fail closed without a private RPC URL.** Live submission is disabled instead of silently degrading to public mempool.
-- **Flash-arb requires a deployed executor contract.** The keeper will refuse live flash-arb mode if the chain route or executor address is missing.
-- **Flash-arb route topology is validated before execution.** The keeper rejects paths that do not decode to quote-token -> AJNA or that would reuse the configured flash-loan pool during callback execution.
-- **Flash-arb callback verification is factory-hardened.** The executor checks the callback sender against the configured Uniswap V3 factory and pool init code hash before repaying any flash loan.
+- **Flash-arb requires at least one deployed family executor.** The keeper will refuse live flash-arb mode if a chain route is missing executable family mappings.
+- **Flash-arb route topology is validated before execution.** The keeper rejects paths that do not decode to quote-token -> AJNA, mixed-family configs with no executable source/swap family, V3 source reuse inside V3 swap routes, and flash sources that cannot currently cover the computed borrow amount.
+- **Callback verification remains protocol-specific and narrow.** `v3v3` and `v3v2` validate the Uniswap V3 flash callback against the configured factory/init code hash, while `v2v3` validates the Uniswap V2 flash pair against the configured factory mapping.
 - **Gas ceiling.** The bot skips execution during gas spikes.
 - **Health check.** HTTP endpoint at `/health` (default port 8080) for monitoring.
 - **Pool discovery is cached locally.** Auto-discovered pool lists are persisted under `.cache/pool-discovery` to make restarts and periodic rediscovery cheaper.

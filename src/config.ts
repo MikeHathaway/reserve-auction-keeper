@@ -10,6 +10,7 @@ import {
 } from "./pricing/oracle.js";
 import type { CoingeckoApiPlan } from "./pricing/coingecko.js";
 import { validateUniswapV3PathEndpoints } from "./utils/uniswap-v3.js";
+import { validateUniswapV2PathEndpoints } from "./utils/uniswap-v2.js";
 
 const addressSchema = z.string().refine(isAddress, "Invalid Ethereum address");
 const hexSchema = z.string().regex(/^0x[0-9a-fA-F]*$/, "Invalid hex string");
@@ -17,11 +18,40 @@ const quoteTokenOverrideSchema = z.object({
   address: addressSchema,
   coingeckoId: z.string().min(1).optional(),
 });
+const flashArbSourceSchema = z.discriminatedUnion("protocol", [
+  z.object({
+    protocol: z.literal("uniswap-v2"),
+    address: addressSchema,
+  }),
+  z.object({
+    protocol: z.literal("uniswap-v3"),
+    address: addressSchema,
+  }),
+]);
+const flashArbSwapRouteSchema = z.discriminatedUnion("protocol", [
+  z.object({
+    protocol: z.literal("uniswap-v2"),
+    path: z.array(addressSchema).min(2, "Uniswap V2 path must contain at least two tokens"),
+  }),
+  z.object({
+    protocol: z.literal("uniswap-v3"),
+    path: hexSchema,
+  }),
+]);
+const flashArbExecutorsSchema = z.object({
+  v3v3: addressSchema.optional(),
+  v2v3: addressSchema.optional(),
+  v3v2: addressSchema.optional(),
+});
 const flashArbRouteSchema = z.object({
-  quoterAddress: addressSchema,
+  quoterAddress: addressSchema.optional(),
+  uniswapV2FactoryAddress: addressSchema.optional(),
   executorAddress: addressSchema.optional(),
-  flashLoanPools: z.record(z.string(), addressSchema),
-  quoteToAjnaPaths: z.record(z.string(), hexSchema),
+  executors: flashArbExecutorsSchema.optional(),
+  flashLoanPools: z.record(z.string(), addressSchema).optional(),
+  quoteToAjnaPaths: z.record(z.string(), hexSchema).optional(),
+  sources: z.record(z.string(), z.array(flashArbSourceSchema).min(1)).optional(),
+  swapRoutes: z.record(z.string(), z.array(flashArbSwapRouteSchema).min(1)).optional(),
 });
 
 const chainConfigSchema = z.object({
@@ -121,12 +151,7 @@ export interface AppConfig {
     executorAddress?: Address;
     routes: Partial<Record<
       "mainnet" | "base" | "arbitrum" | "optimism" | "polygon",
-      {
-        quoterAddress: Address;
-        executorAddress?: Address;
-        flashLoanPools: Record<string, Address>;
-        quoteToAjnaPaths: Record<string, Hex>;
-      }
+      NormalizedFlashArbRoute
     >>;
   };
   polling: {
@@ -144,6 +169,42 @@ export interface AppConfig {
 
 type ChainName = "mainnet" | "base" | "arbitrum" | "optimism" | "polygon";
 
+export type FlashArbExecutorFamily = "v3v3" | "v2v3" | "v3v2";
+
+export interface FlashArbSourceV2Config {
+  protocol: "uniswap-v2";
+  address: Address;
+}
+
+export interface FlashArbSourceV3Config {
+  protocol: "uniswap-v3";
+  address: Address;
+}
+
+export type FlashArbSourceConfig = FlashArbSourceV2Config | FlashArbSourceV3Config;
+
+export interface FlashArbSwapRouteV2Config {
+  protocol: "uniswap-v2";
+  path: Address[];
+}
+
+export interface FlashArbSwapRouteV3Config {
+  protocol: "uniswap-v3";
+  path: Hex;
+}
+
+export type FlashArbSwapRouteConfig =
+  | FlashArbSwapRouteV2Config
+  | FlashArbSwapRouteV3Config;
+
+export interface NormalizedFlashArbRoute {
+  quoterAddress?: Address;
+  uniswapV2FactoryAddress?: Address;
+  executors: Partial<Record<FlashArbExecutorFamily, Address>>;
+  sources: Record<string, FlashArbSourceConfig[]>;
+  swapRoutes: Record<string, FlashArbSwapRouteConfig[]>;
+}
+
 function normalizeSymbol(symbol: string): string {
   return symbol.trim().toUpperCase();
 }
@@ -152,6 +213,75 @@ function normalizeRecordKeys<T>(record: Record<string, T>): Record<string, T> {
   return Object.fromEntries(
     Object.entries(record).map(([key, value]) => [normalizeSymbol(key), value]),
   );
+}
+
+function normalizeFlashArbSources(
+  rawSources: Record<string, Array<z.infer<typeof flashArbSourceSchema>>> | undefined,
+  legacyFlashLoanPools: Record<string, Address> | undefined,
+): Record<string, FlashArbSourceConfig[]> {
+  const normalized = new Map<string, FlashArbSourceConfig[]>();
+
+  for (const [rawSymbol, sources] of Object.entries(rawSources || {})) {
+    normalized.set(normalizeSymbol(rawSymbol), sources.map((source) => ({
+      protocol: source.protocol,
+      address: source.address as Address,
+    })));
+  }
+
+  for (const [rawSymbol, address] of Object.entries(legacyFlashLoanPools || {})) {
+    const symbol = normalizeSymbol(rawSymbol);
+    const existing = normalized.get(symbol) || [];
+    if (!existing.some((source) =>
+      source.protocol === "uniswap-v3" &&
+      source.address.toLowerCase() === address.toLowerCase()
+    )) {
+      existing.push({
+        protocol: "uniswap-v3",
+        address: address as Address,
+      });
+    }
+    normalized.set(symbol, existing);
+  }
+
+  return Object.fromEntries(normalized.entries());
+}
+
+function normalizeFlashArbSwapRoutes(
+  rawSwapRoutes: Record<string, Array<z.infer<typeof flashArbSwapRouteSchema>>> | undefined,
+  legacyQuoteToAjnaPaths: Record<string, Hex> | undefined,
+): Record<string, FlashArbSwapRouteConfig[]> {
+  const normalized = new Map<string, FlashArbSwapRouteConfig[]>();
+
+  for (const [rawSymbol, routes] of Object.entries(rawSwapRoutes || {})) {
+    normalized.set(normalizeSymbol(rawSymbol), routes.map((route) =>
+      route.protocol === "uniswap-v3"
+        ? {
+            protocol: "uniswap-v3" as const,
+            path: route.path as Hex,
+          }
+        : {
+            protocol: "uniswap-v2" as const,
+            path: route.path as Address[],
+          }
+    ));
+  }
+
+  for (const [rawSymbol, path] of Object.entries(legacyQuoteToAjnaPaths || {})) {
+    const symbol = normalizeSymbol(rawSymbol);
+    const existing = normalized.get(symbol) || [];
+    if (!existing.some((route) =>
+      route.protocol === "uniswap-v3" &&
+      route.path.toLowerCase() === path.toLowerCase()
+    )) {
+      existing.push({
+        protocol: "uniswap-v3",
+        path: path as Hex,
+      });
+    }
+    normalized.set(symbol, existing);
+  }
+
+  return Object.fromEntries(normalized.entries());
 }
 
 function mergeChainConfig(
@@ -201,44 +331,43 @@ function mergeChainConfig(
 }
 
 function normalizeFlashArbRouteMaps(
-  routes: AppConfig["flashArb"]["routes"],
+  routes: Partial<Record<ChainName, z.infer<typeof flashArbRouteSchema> | undefined>>,
+  defaultExecutorAddress?: Address,
 ): AppConfig["flashArb"]["routes"] {
+  const normalizeRoute = (
+    route: z.infer<typeof flashArbRouteSchema> | undefined,
+  ): NormalizedFlashArbRoute | undefined => {
+    if (!route) return undefined;
+
+    const executors: Partial<Record<FlashArbExecutorFamily, Address>> = {
+      v3v3: (route.executors?.v3v3 || route.executorAddress || defaultExecutorAddress) as
+        | Address
+        | undefined,
+      v2v3: route.executors?.v2v3 as Address | undefined,
+      v3v2: route.executors?.v3v2 as Address | undefined,
+    };
+
+    return {
+      quoterAddress: route.quoterAddress as Address | undefined,
+      uniswapV2FactoryAddress: route.uniswapV2FactoryAddress as Address | undefined,
+      executors,
+      sources: normalizeFlashArbSources(
+        route.sources,
+        normalizeRecordKeys(route.flashLoanPools || {}) as Record<string, Address>,
+      ),
+      swapRoutes: normalizeFlashArbSwapRoutes(
+        route.swapRoutes,
+        normalizeRecordKeys(route.quoteToAjnaPaths || {}) as Record<string, Hex>,
+      ),
+    };
+  };
+
   return {
-    mainnet: routes.mainnet
-      ? {
-          ...routes.mainnet,
-          flashLoanPools: normalizeRecordKeys(routes.mainnet.flashLoanPools),
-          quoteToAjnaPaths: normalizeRecordKeys(routes.mainnet.quoteToAjnaPaths),
-        }
-      : undefined,
-    base: routes.base
-      ? {
-          ...routes.base,
-          flashLoanPools: normalizeRecordKeys(routes.base.flashLoanPools),
-          quoteToAjnaPaths: normalizeRecordKeys(routes.base.quoteToAjnaPaths),
-        }
-      : undefined,
-    arbitrum: routes.arbitrum
-      ? {
-          ...routes.arbitrum,
-          flashLoanPools: normalizeRecordKeys(routes.arbitrum.flashLoanPools),
-          quoteToAjnaPaths: normalizeRecordKeys(routes.arbitrum.quoteToAjnaPaths),
-        }
-      : undefined,
-    optimism: routes.optimism
-      ? {
-          ...routes.optimism,
-          flashLoanPools: normalizeRecordKeys(routes.optimism.flashLoanPools),
-          quoteToAjnaPaths: normalizeRecordKeys(routes.optimism.quoteToAjnaPaths),
-        }
-      : undefined,
-    polygon: routes.polygon
-      ? {
-          ...routes.polygon,
-          flashLoanPools: normalizeRecordKeys(routes.polygon.flashLoanPools),
-          quoteToAjnaPaths: normalizeRecordKeys(routes.polygon.quoteToAjnaPaths),
-        }
-      : undefined,
+    mainnet: normalizeRoute(routes.mainnet),
+    base: normalizeRoute(routes.base),
+    arbitrum: normalizeRoute(routes.arbitrum),
+    optimism: normalizeRoute(routes.optimism),
+    polygon: normalizeRoute(routes.polygon),
   };
 }
 
@@ -246,14 +375,24 @@ function validateEnabledFlashArbRoutes(
   chains: ResolvedChainConfig[],
   routes: AppConfig["flashArb"]["routes"],
 ) {
+  const resolveFamily = (
+    sourceProtocol: FlashArbSourceConfig["protocol"],
+    swapProtocol: FlashArbSwapRouteConfig["protocol"],
+  ): FlashArbExecutorFamily | null => {
+    if (sourceProtocol === "uniswap-v2" && swapProtocol === "uniswap-v3") return "v2v3";
+    if (sourceProtocol === "uniswap-v3" && swapProtocol === "uniswap-v2") return "v3v2";
+    if (sourceProtocol === "uniswap-v3" && swapProtocol === "uniswap-v3") return "v3v3";
+    return null;
+  };
+
   for (const resolved of chains) {
     const chainName = resolved.chainConfig.name as ChainName;
     const route = routes[chainName];
     if (!route) continue;
 
-    const symbols = new Set([
-      ...Object.keys(route.flashLoanPools),
-      ...Object.keys(route.quoteToAjnaPaths),
+      const symbols = new Set([
+      ...Object.keys(route.sources),
+      ...Object.keys(route.swapRoutes),
     ]);
 
     for (const symbol of symbols) {
@@ -264,27 +403,68 @@ function validateEnabledFlashArbRoutes(
         );
       }
 
-      if (!route.flashLoanPools[symbol]) {
+      const sources = route.sources[symbol];
+      if (!sources || sources.length === 0) {
         throw new Error(
-          `flashArb.routes.${chainName}.flashLoanPools.${symbol} is required when a swap path is configured`,
+          `flashArb.routes.${chainName}.sources.${symbol} is required when a swap route is configured`,
         );
       }
 
-      const swapPath = route.quoteToAjnaPaths[symbol];
-      if (!swapPath) {
+      const swapRoutes = route.swapRoutes[symbol];
+      if (!swapRoutes || swapRoutes.length === 0) {
         throw new Error(
-          `flashArb.routes.${chainName}.quoteToAjnaPaths.${symbol} is required when a flash-loan pool is configured`,
+          `flashArb.routes.${chainName}.swapRoutes.${symbol} is required when a flash source is configured`,
         );
       }
 
-      const pathError = validateUniswapV3PathEndpoints(
-        swapPath,
-        quoteToken,
-        resolved.chainConfig.ajnaToken,
+      for (const swapRoute of swapRoutes) {
+        if (swapRoute.protocol === "uniswap-v3") {
+          if (!route.quoterAddress) {
+            throw new Error(
+              `flashArb.routes.${chainName}.quoterAddress is required when ${symbol} uses a Uniswap V3 swap route`,
+            );
+          }
+
+          const pathError = validateUniswapV3PathEndpoints(
+            swapRoute.path,
+            quoteToken,
+            resolved.chainConfig.ajnaToken,
+          );
+          if (pathError) {
+            throw new Error(
+              `flashArb.routes.${chainName}.swapRoutes.${symbol} must encode a ${symbol} -> AJNA route: ${pathError}`,
+            );
+          }
+          continue;
+        }
+
+        if (!route.uniswapV2FactoryAddress) {
+          throw new Error(
+            `flashArb.routes.${chainName}.uniswapV2FactoryAddress is required when ${symbol} uses a Uniswap V2 swap route`,
+          );
+        }
+
+        const pathError = validateUniswapV2PathEndpoints(
+          swapRoute.path,
+          quoteToken,
+          resolved.chainConfig.ajnaToken,
+        );
+        if (pathError) {
+          throw new Error(
+            `flashArb.routes.${chainName}.swapRoutes.${symbol} must encode a ${symbol} -> AJNA route: ${pathError}`,
+          );
+        }
+      }
+
+      const hasExecutableFamily = sources.some((source) =>
+        swapRoutes.some((swapRoute) => {
+          const family = resolveFamily(source.protocol, swapRoute.protocol);
+          return family != null && route.executors[family] != null;
+        })
       );
-      if (pathError) {
+      if (!hasExecutableFamily) {
         throw new Error(
-          `flashArb.routes.${chainName}.quoteToAjnaPaths.${symbol} must encode a ${symbol} -> AJNA route: ${pathError}`,
+          `flashArb.routes.${chainName}.${symbol} does not define any executable source/swap family with a configured executor`,
         );
       }
     }
@@ -385,47 +565,12 @@ export function loadConfig(configPath: string): AppConfig {
     profitabilityThreshold: 0.2,
   };
   const flashArbRoutes = normalizeFlashArbRouteMaps({
-    mainnet: flashArb.routes?.mainnet
-      ? {
-          quoterAddress: flashArb.routes.mainnet.quoterAddress as Address,
-          executorAddress: flashArb.routes.mainnet.executorAddress as Address | undefined,
-          flashLoanPools: flashArb.routes.mainnet.flashLoanPools as Record<string, Address>,
-          quoteToAjnaPaths: flashArb.routes.mainnet.quoteToAjnaPaths as Record<string, Hex>,
-        }
-      : undefined,
-    base: flashArb.routes?.base
-      ? {
-          quoterAddress: flashArb.routes.base.quoterAddress as Address,
-          executorAddress: flashArb.routes.base.executorAddress as Address | undefined,
-          flashLoanPools: flashArb.routes.base.flashLoanPools as Record<string, Address>,
-          quoteToAjnaPaths: flashArb.routes.base.quoteToAjnaPaths as Record<string, Hex>,
-        }
-      : undefined,
-    arbitrum: flashArb.routes?.arbitrum
-      ? {
-          quoterAddress: flashArb.routes.arbitrum.quoterAddress as Address,
-          executorAddress: flashArb.routes.arbitrum.executorAddress as Address | undefined,
-          flashLoanPools: flashArb.routes.arbitrum.flashLoanPools as Record<string, Address>,
-          quoteToAjnaPaths: flashArb.routes.arbitrum.quoteToAjnaPaths as Record<string, Hex>,
-        }
-      : undefined,
-    optimism: flashArb.routes?.optimism
-      ? {
-          quoterAddress: flashArb.routes.optimism.quoterAddress as Address,
-          executorAddress: flashArb.routes.optimism.executorAddress as Address | undefined,
-          flashLoanPools: flashArb.routes.optimism.flashLoanPools as Record<string, Address>,
-          quoteToAjnaPaths: flashArb.routes.optimism.quoteToAjnaPaths as Record<string, Hex>,
-        }
-      : undefined,
-    polygon: flashArb.routes?.polygon
-      ? {
-          quoterAddress: flashArb.routes.polygon.quoterAddress as Address,
-          executorAddress: flashArb.routes.polygon.executorAddress as Address | undefined,
-          flashLoanPools: flashArb.routes.polygon.flashLoanPools as Record<string, Address>,
-          quoteToAjnaPaths: flashArb.routes.polygon.quoteToAjnaPaths as Record<string, Hex>,
-        }
-      : undefined,
-  });
+    mainnet: flashArb.routes?.mainnet,
+    base: flashArb.routes?.base,
+    arbitrum: flashArb.routes?.arbitrum,
+    optimism: flashArb.routes?.optimism,
+    polygon: flashArb.routes?.polygon,
+  }, flashArb.executorAddress as Address | undefined);
   if (parsed.strategy === "flash-arb") {
     validateEnabledFlashArbRoutes(chains, flashArbRoutes);
   }

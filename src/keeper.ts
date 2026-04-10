@@ -20,7 +20,6 @@ import {
   type AlchemyPricesClient,
 } from "./pricing/alchemy.js";
 import { createPriceOracle } from "./pricing/oracle.js";
-import { createUniswapV3DexQuoter } from "./pricing/uniswap-v3.js";
 import { createFundedStrategy } from "./strategies/funded.js";
 import { createFlashArbStrategy } from "./strategies/flash-arb.js";
 import type { ExecutionStrategy, AuctionContext } from "./strategies/interface.js";
@@ -78,22 +77,8 @@ function createStrategy(
       minProfitUsd: config.flashArb.minProfitUsd,
       ajnaToken: resolved.chainConfig.ajnaToken,
       nativeTokenPriceUsd: resolved.chainConfig.nativeTokenPriceUsd,
-      executorAddress: config.flashArb.executorAddress,
       dryRun: config.dryRun,
-      route: route
-        ? {
-            executorAddress: route.executorAddress,
-            flashLoanPools: route.flashLoanPools,
-            quoteToAjnaPaths: route.quoteToAjnaPaths,
-          }
-        : undefined,
-      dexQuoter: route
-        ? createUniswapV3DexQuoter(publicClient, {
-            quoterAddress: route.quoterAddress,
-            quoteToAjnaPaths: route.quoteToAjnaPaths,
-            label: `${resolved.chainConfig.name}.flashArb`,
-          })
-        : undefined,
+      route,
     });
   }
 
@@ -149,7 +134,6 @@ function createChainKeeper(
 
   if (!config.dryRun && config.strategy === "flash-arb") {
     const route = getFlashArbRoute(resolved, config);
-    const executorAddress = route?.executorAddress || config.flashArb.executorAddress;
 
     if (!route) {
       throw new Error(
@@ -157,9 +141,9 @@ function createChainKeeper(
       );
     }
 
-    if (!executorAddress) {
+    if (!route.executors.v3v3 && !route.executors.v2v3 && !route.executors.v3v2) {
       throw new Error(
-        `Flash-arb executorAddress is required for live ${resolved.chainConfig.name} execution.`,
+        `At least one flash-arb executor is required for live ${resolved.chainConfig.name} execution.`,
       );
     }
   }
