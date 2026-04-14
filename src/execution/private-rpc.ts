@@ -1,14 +1,17 @@
 import {
+  type Hex,
   type PublicClient,
   type WalletClient,
   createPublicClient,
   http,
   encodeFunctionData,
+  keccak256,
 } from "viem";
 import type { MevSubmitter, SubmitRequest } from "./mev-submitter.js";
 import { logger, redactUrlForLogs } from "../utils/logger.js";
 import { isTransientRpcError, retryAsync } from "../utils/retry.js";
 import { getEip1559FeeCapOverrides } from "./gas.js";
+import { createPendingSubmissionError } from "./receipt.js";
 
 const DEFAULT_WRITE_PATH_HEALTHY_CACHE_MS = 60_000;
 const DEFAULT_WRITE_PATH_FAILURE_RETRY_MS = 5_000;
@@ -75,6 +78,15 @@ function isWritePathAvailabilityError(error: unknown): boolean {
     "method not supported",
     "unsupported method",
     "access denied",
+  ].some((fragment) => message.includes(fragment));
+}
+
+function isKnownRawTransactionError(error: unknown): boolean {
+  const message = String(error instanceof Error ? error.message : error).toLowerCase();
+  return [
+    "already known",
+    "known transaction",
+    "nonce too low",
   ].some((fragment) => message.includes(fragment));
 }
 
@@ -154,6 +166,29 @@ export function createPrivateRpcSubmitter(
     }
   }
 
+  async function sendRawTransaction(
+    testClient: ReturnType<typeof createHealthCheckClient>,
+    serializedTransaction: Hex,
+  ): Promise<Hex> {
+    const requestCapableClient = testClient as typeof testClient & {
+      request(args: {
+        method: string;
+        params?: unknown[];
+      }): Promise<unknown>;
+    };
+
+    const result = await requestCapableClient.request({
+      method: "eth_sendRawTransaction",
+      params: [serializedTransaction],
+    });
+
+    if (typeof result !== "string") {
+      throw new Error("Private RPC eth_sendRawTransaction returned no transaction hash.");
+    }
+
+    return result as Hex;
+  }
+
   return {
     name: "private-rpc",
     supportsLiveSubmission: !!effectiveUrl && privateRpcTrusted,
@@ -186,25 +221,98 @@ export function createPrivateRpcSubmitter(
         args: request.args,
       });
 
-      let hash;
+      const metadataClient = createHealthCheckClient();
+      let nonce: bigint;
       try {
-        hash = await retryAsync(
+        const capturedNonce = await retryAsync(
+          () => metadataClient.getTransactionCount({
+            address: request.account,
+            blockTag: "pending",
+          }),
+          {
+            label: `private-rpc.capture-nonce.${request.functionName}`,
+            shouldRetry: isTransientRpcError,
+          },
+        );
+        nonce = BigInt(capturedNonce);
+      } catch (error) {
+        if (isWritePathAvailabilityError(error)) {
+          recordWritePathHealth(false);
+        }
+        throw error;
+      }
+      const submittedAtMs = now();
+
+      const account = walletClient.account;
+      if (!account?.signTransaction) {
+        throw new Error(
+          "Private RPC submission requires a local account that can sign raw transactions.",
+        );
+      }
+
+      const prepared = await walletClient.prepareTransactionRequest({
+        account,
+        chain: publicClient.chain,
+        to: request.to,
+        data: calldata,
+        nonce: Number(nonce),
+        type: "eip1559",
+        ...(request.feeCapOverrides ??
+          getEip1559FeeCapOverrides(request.gasPriceWei) ??
+          {}),
+      });
+
+      const serializedTransaction = await account.signTransaction(prepared, {
+        serializer: publicClient.chain?.serializers?.transaction,
+      });
+      const txHash = keccak256(serializedTransaction);
+
+      try {
+        const returnedHash = await retryAsync(
           () =>
-            walletClient.sendTransaction({
-              to: request.to,
-              data: calldata,
-              chain: publicClient.chain,
-              account: walletClient.account!,
-              ...(request.feeCapOverrides ??
-                getEip1559FeeCapOverrides(request.gasPriceWei) ??
-                {}),
-            }),
+            sendRawTransaction(metadataClient, serializedTransaction),
           {
             label: `private-rpc.submit.${request.functionName}`,
             shouldRetry: isTransientRpcError,
           },
         );
+        if (returnedHash !== txHash) {
+          throw new Error(
+            `Private RPC returned unexpected transaction hash ${returnedHash} for ${request.functionName}.`,
+          );
+        }
       } catch (error) {
+        if (isKnownRawTransactionError(error)) {
+          logger.info("Transaction already accepted by private RPC", {
+            txHash,
+            to: request.to,
+            functionName: request.functionName,
+          });
+          recordWritePathHealth(true);
+          return {
+            mode: "private-rpc" as const,
+            txHash,
+            privateSubmission: true,
+            account: request.account,
+            nonce,
+            submittedAtMs,
+          };
+        }
+        if (isTransientRpcError(error)) {
+          recordWritePathHealth(false);
+          throw createPendingSubmissionError(
+            {
+              txHash,
+              label: request.functionName,
+              mode: "private-rpc",
+              privateSubmission: true,
+              account: request.account,
+              nonce,
+              submittedAtMs,
+            },
+            `Private RPC submission may have succeeded but the endpoint response was lost: ${String(error instanceof Error ? error.message : error)}`,
+          );
+        }
         if (isWritePathAvailabilityError(error)) {
           recordWritePathHealth(false);
         }
@@ -213,15 +321,18 @@ export function createPrivateRpcSubmitter(
       recordWritePathHealth(true);
 
       logger.info("Transaction submitted via private RPC", {
-        hash,
+        hash: txHash,
         to: request.to,
         privateRpc: !!effectiveUrl,
       });
 
       return {
         mode: "private-rpc" as const,
-        txHash: hash,
+        txHash,
         privateSubmission: true,
+        account: request.account,
+        nonce,
+        submittedAtMs,
       };
     },
 

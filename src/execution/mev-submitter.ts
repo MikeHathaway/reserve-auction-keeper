@@ -17,6 +17,9 @@ export interface SubmissionResult {
   bundleHash?: string;
   targetBlock?: bigint;
   privateSubmission: boolean;
+  account?: Address;
+  nonce?: bigint;
+  submittedAtMs?: number;
 }
 
 export interface PendingSubmission {
@@ -26,6 +29,9 @@ export interface PendingSubmission {
   bundleHash?: string;
   targetBlock?: bigint;
   privateSubmission?: boolean;
+  account?: Address;
+  nonce?: bigint;
+  submittedAtMs?: number;
 }
 
 export interface MevSubmitter {

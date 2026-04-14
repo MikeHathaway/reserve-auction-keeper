@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { keccak256 } from "viem";
 import { base } from "viem/chains";
 import type * as ViemModule from "viem";
 
@@ -17,6 +18,7 @@ vi.mock("viem", async () => {
 });
 
 import { createPrivateRpcSubmitter } from "../../src/execution/private-rpc.js";
+import { PendingSubmissionError } from "../../src/execution/receipt.js";
 
 const SIMPLE_ABI = [
   {
@@ -35,6 +37,10 @@ const REQUEST = {
   args: [],
   account: "0x2222222222222222222222222222222222222222",
 } as const;
+
+const SERIALIZED_TX =
+  "0x02f86c0180843b9aca0084773594008252089411111111111111111111111111111111111111118084c2985578c001a0a11f5a8a0f4d8d25569d5e4f7f0626ab3f6fcb36ed3b1e4a3ec7fcbcb58f2c0aa02e42f6b9ba3d4f2836454dfd1d565f0a4b7a9f0c9865df2dd8d64f0d3f96b610";
+const SERIALIZED_TX_HASH = keccak256(SERIALIZED_TX);
 
 describe("private-rpc submitter", () => {
   beforeEach(() => {
@@ -80,16 +86,84 @@ describe("private-rpc submitter", () => {
     expect(walletClient.sendTransaction).not.toHaveBeenCalled();
   });
 
-  it("retries transient submission failures", async () => {
+  it("retries transient submission failures with the same signed raw transaction", async () => {
+    const nowMs = 123_456;
+    const request = vi.fn()
+      .mockRejectedValueOnce(new Error("fetch failed"))
+      .mockResolvedValueOnce(SERIALIZED_TX_HASH);
     const walletClient = {
-      account: { address: REQUEST.account },
-      sendTransaction: vi.fn()
-        .mockRejectedValueOnce(new Error("fetch failed"))
-        .mockResolvedValueOnce(
-          "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        ),
+      account: {
+        address: REQUEST.account,
+        signTransaction: vi.fn().mockResolvedValue(SERIALIZED_TX),
+      },
+      prepareTransactionRequest: vi.fn().mockResolvedValue({
+        to: REQUEST.to,
+        data: "0x",
+        type: "eip1559",
+        nonce: 7n,
+      }),
     };
     const publicClient = { chain: base };
+    mockCreatePublicClient.mockReturnValue({
+      getBlockNumber: vi.fn().mockResolvedValue(123n),
+      getTransactionCount: vi.fn().mockResolvedValue(7n),
+      request,
+    });
+
+    const submitter = createPrivateRpcSubmitter(
+      publicClient as never,
+      walletClient as never,
+      "https://private-rpc.example",
+      true,
+      {
+        now: () => nowMs,
+      },
+    );
+    vi.spyOn(submitter, "isHealthy").mockResolvedValue(true);
+
+    const submission = await submitter.submit(REQUEST);
+
+    expect(submission).toEqual(expect.objectContaining({
+      mode: "private-rpc",
+      txHash: SERIALIZED_TX_HASH,
+      privateSubmission: true,
+      account: REQUEST.account,
+      nonce: 7n,
+      submittedAtMs: nowMs,
+    }));
+    expect(walletClient.prepareTransactionRequest).toHaveBeenCalledTimes(1);
+    expect(walletClient.account.signTransaction).toHaveBeenCalledTimes(1);
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(request).toHaveBeenNthCalledWith(1, {
+      method: "eth_sendRawTransaction",
+      params: [SERIALIZED_TX],
+    });
+    expect(request).toHaveBeenNthCalledWith(2, {
+      method: "eth_sendRawTransaction",
+      params: [SERIALIZED_TX],
+    });
+  });
+
+  it("surfaces ambiguous transient send failures as pending submissions instead of creating new transactions", async () => {
+    const walletClient = {
+      account: {
+        address: REQUEST.account,
+        signTransaction: vi.fn().mockResolvedValue(SERIALIZED_TX),
+      },
+      prepareTransactionRequest: vi.fn().mockResolvedValue({
+        to: REQUEST.to,
+        data: "0x",
+        type: "eip1559",
+        nonce: 7n,
+      }),
+    };
+    const publicClient = { chain: base };
+    const request = vi.fn().mockRejectedValue(new Error("fetch failed"));
+    mockCreatePublicClient.mockReturnValue({
+      getBlockNumber: vi.fn().mockResolvedValue(123n),
+      getTransactionCount: vi.fn().mockResolvedValue(7n),
+      request,
+    });
 
     const submitter = createPrivateRpcSubmitter(
       publicClient as never,
@@ -99,22 +173,51 @@ describe("private-rpc submitter", () => {
     );
     vi.spyOn(submitter, "isHealthy").mockResolvedValue(true);
 
-    const submission = await submitter.submit(REQUEST);
+    const thrownError = await submitter.submit(REQUEST).catch((error: unknown) => error);
 
-    expect(submission).toEqual({
+    expect(thrownError).toBeInstanceOf(PendingSubmissionError);
+    expect((thrownError as PendingSubmissionError).pendingSubmission).toEqual({
+      txHash: SERIALIZED_TX_HASH,
+      label: "poke",
       mode: "private-rpc",
-      txHash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       privateSubmission: true,
+      account: REQUEST.account,
+      nonce: 7n,
+      submittedAtMs: expect.any(Number),
     });
-    expect(walletClient.sendTransaction).toHaveBeenCalledTimes(2);
+    expect(walletClient.prepareTransactionRequest).toHaveBeenCalledTimes(1);
+    expect(walletClient.account.signTransaction).toHaveBeenCalledTimes(1);
+    expect(request).toHaveBeenCalledTimes(3);
+    expect(request).toHaveBeenNthCalledWith(1, {
+      method: "eth_sendRawTransaction",
+      params: [SERIALIZED_TX],
+    });
+    expect(request).toHaveBeenNthCalledWith(3, {
+      method: "eth_sendRawTransaction",
+      params: [SERIALIZED_TX],
+    });
   });
 
   it("does not retry non-transient submission failures", async () => {
+    const request = vi.fn().mockRejectedValue(new Error("insufficient funds"));
     const walletClient = {
-      account: { address: REQUEST.account },
-      sendTransaction: vi.fn().mockRejectedValue(new Error("insufficient funds")),
+      account: {
+        address: REQUEST.account,
+        signTransaction: vi.fn().mockResolvedValue(SERIALIZED_TX),
+      },
+      prepareTransactionRequest: vi.fn().mockResolvedValue({
+        to: REQUEST.to,
+        data: "0x",
+        type: "eip1559",
+        nonce: 7n,
+      }),
     };
     const publicClient = { chain: base };
+    mockCreatePublicClient.mockReturnValue({
+      getBlockNumber: vi.fn().mockResolvedValue(123n),
+      getTransactionCount: vi.fn().mockResolvedValue(7n),
+      request,
+    });
 
     const submitter = createPrivateRpcSubmitter(
       publicClient as never,
@@ -125,17 +228,31 @@ describe("private-rpc submitter", () => {
     vi.spyOn(submitter, "isHealthy").mockResolvedValue(true);
 
     await expect(submitter.submit(REQUEST)).rejects.toThrow("insufficient funds");
-    expect(walletClient.sendTransaction).toHaveBeenCalledTimes(1);
+    expect(walletClient.prepareTransactionRequest).toHaveBeenCalledTimes(1);
+    expect(walletClient.account.signTransaction).toHaveBeenCalledTimes(1);
+    expect(request).toHaveBeenCalledTimes(1);
   });
 
   it("applies the requested gas-price cap to live submissions", async () => {
+    const request = vi.fn().mockResolvedValue(SERIALIZED_TX_HASH);
     const walletClient = {
-      account: { address: REQUEST.account },
-      sendTransaction: vi.fn().mockResolvedValue(
-        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      ),
+      account: {
+        address: REQUEST.account,
+        signTransaction: vi.fn().mockResolvedValue(SERIALIZED_TX),
+      },
+      prepareTransactionRequest: vi.fn().mockResolvedValue({
+        to: REQUEST.to,
+        data: "0x",
+        type: "eip1559",
+        nonce: 7n,
+      }),
     };
     const publicClient = { chain: base };
+    mockCreatePublicClient.mockReturnValue({
+      getBlockNumber: vi.fn().mockResolvedValue(123n),
+      getTransactionCount: vi.fn().mockResolvedValue(7n),
+      request,
+    });
 
     const submitter = createPrivateRpcSubmitter(
       publicClient as never,
@@ -150,8 +267,9 @@ describe("private-rpc submitter", () => {
       gasPriceWei: 1_500_000_000n,
     });
 
-    expect(walletClient.sendTransaction).toHaveBeenCalledWith(
+    expect(walletClient.prepareTransactionRequest).toHaveBeenCalledWith(
       expect.objectContaining({
+        nonce: 7,
         maxFeePerGas: 1_500_000_000n,
         maxPriorityFeePerGas: 1_500_000_000n,
       }),
@@ -314,18 +432,25 @@ describe("private-rpc submitter", () => {
     expect(thirdRequest).toHaveBeenCalledTimes(1);
   });
 
-  it("marks the write path unhealthy immediately after a live sendTransaction endpoint failure", async () => {
-    const healthRequest = vi.fn().mockRejectedValue(
-      new Error("failed to decode signed transaction"),
-    );
+  it("marks the write path unhealthy immediately after a live raw-transaction endpoint failure", async () => {
+    const submissionRequest = vi.fn().mockRejectedValue(new Error("403 forbidden"));
     mockCreatePublicClient.mockReturnValue({
       getBlockNumber: vi.fn().mockResolvedValue(123n),
-      request: healthRequest,
+      getTransactionCount: vi.fn().mockResolvedValue(7n),
+      request: submissionRequest,
     });
 
     const walletClient = {
-      account: { address: REQUEST.account },
-      sendTransaction: vi.fn().mockRejectedValue(new Error("403 forbidden")),
+      account: {
+        address: REQUEST.account,
+        signTransaction: vi.fn().mockResolvedValue(SERIALIZED_TX),
+      },
+      prepareTransactionRequest: vi.fn().mockResolvedValue({
+        to: REQUEST.to,
+        data: "0x",
+        type: "eip1559",
+        nonce: 7n,
+      }),
     };
 
     const submitter = createPrivateRpcSubmitter(
@@ -337,23 +462,35 @@ describe("private-rpc submitter", () => {
         writePathFailureRetryMs: 60_000,
       },
     );
+    vi.spyOn(submitter, "isHealthy").mockResolvedValueOnce(true);
 
     await expect(submitter.submit(REQUEST)).rejects.toThrow("403 forbidden");
+    expect(submissionRequest).toHaveBeenCalledWith({
+      method: "eth_sendRawTransaction",
+      params: [SERIALIZED_TX],
+    });
     await expect(submitter.isHealthy()).resolves.toBe(false);
   });
 
   it("marks the write path unhealthy after a generic private RPC server-side submission failure", async () => {
-    const healthRequest = vi.fn().mockRejectedValue(
-      new Error("failed to decode signed transaction"),
-    );
+    const submissionRequest = vi.fn().mockRejectedValue(new Error("500 internal server error"));
     mockCreatePublicClient.mockReturnValue({
       getBlockNumber: vi.fn().mockResolvedValue(123n),
-      request: healthRequest,
+      getTransactionCount: vi.fn().mockResolvedValue(7n),
+      request: submissionRequest,
     });
 
     const walletClient = {
-      account: { address: REQUEST.account },
-      sendTransaction: vi.fn().mockRejectedValue(new Error("500 internal server error")),
+      account: {
+        address: REQUEST.account,
+        signTransaction: vi.fn().mockResolvedValue(SERIALIZED_TX),
+      },
+      prepareTransactionRequest: vi.fn().mockResolvedValue({
+        to: REQUEST.to,
+        data: "0x",
+        type: "eip1559",
+        nonce: 7n,
+      }),
     };
 
     const submitter = createPrivateRpcSubmitter(
@@ -365,8 +502,13 @@ describe("private-rpc submitter", () => {
         writePathFailureRetryMs: 60_000,
       },
     );
+    vi.spyOn(submitter, "isHealthy").mockResolvedValueOnce(true);
 
     await expect(submitter.submit(REQUEST)).rejects.toThrow("500 internal server error");
+    expect(submissionRequest).toHaveBeenCalledWith({
+      method: "eth_sendRawTransaction",
+      params: [SERIALIZED_TX],
+    });
     await expect(submitter.isHealthy()).resolves.toBe(false);
   });
 });

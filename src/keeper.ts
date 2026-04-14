@@ -28,6 +28,12 @@ import { createPrivateRpcSubmitter } from "./execution/private-rpc.js";
 import type { MevSubmitter, PendingSubmission, SubmissionResult } from "./execution/mev-submitter.js";
 import { PendingSubmissionError, waitForConfirmedReceipt } from "./execution/receipt.js";
 import {
+  clearPendingSubmission as clearPersistedPendingSubmission,
+  loadPendingSubmission,
+  savePendingSubmission,
+  type PendingSubmissionRecord,
+} from "./execution/pending-submission-store.js";
+import {
   evaluateGasCost,
   getNextBlockSafeFeeCapOverrides,
   getNextBlockSafeGasPriceWei,
@@ -61,10 +67,10 @@ interface ChainKeeper {
   pools: Address[];
 }
 
-interface PendingSubmissionState extends PendingSubmission {
-  operation: "execution" | "reserve-auction kick";
-  pool: Address;
-}
+type PendingSubmissionState = PendingSubmissionRecord;
+
+const FLASHBOTS_PENDING_BLOCK_GRACE = 2n;
+const PRIVATE_RPC_PENDING_EXPIRY_MS = 120_000;
 
 function getSubmitterHealthDependencyKey(keeper: ChainKeeper): string {
   return `submitter:${keeper.chainConfig.chainConfig.name}:${keeper.submitter.name}`;
@@ -395,6 +401,9 @@ function toSubmissionResult(
     bundleHash: pendingSubmission.bundleHash,
     targetBlock: pendingSubmission.targetBlock,
     privateSubmission: pendingSubmission.privateSubmission ?? false,
+    account: pendingSubmission.account,
+    nonce: pendingSubmission.nonce,
+    submittedAtMs: pendingSubmission.submittedAtMs,
   };
 }
 
@@ -441,6 +450,119 @@ async function resolvePendingSubmission(
   chainName: string,
   pendingSubmission: PendingSubmissionState,
 ): Promise<boolean> {
+  if (pendingSubmission.mode === "flashbots" && pendingSubmission.targetBlock != null) {
+    try {
+      const receipt = await publicClient.getTransactionReceipt({
+        hash: pendingSubmission.txHash,
+      });
+
+      setHealthDependency(getPendingSubmissionHealthDependencyKey(chainName), true);
+      logger.info("Previously submitted transaction outcome resolved", {
+        chain: chainName,
+        operation: pendingSubmission.operation,
+        pool: pendingSubmission.pool,
+        txHash: pendingSubmission.txHash,
+        label: pendingSubmission.label,
+        submissionMode: pendingSubmission.mode,
+        bundleHash: pendingSubmission.bundleHash,
+        targetBlock: pendingSubmission.targetBlock?.toString(),
+        status: receipt.status,
+        blockNumber: receipt.blockNumber.toString(),
+      });
+      return true;
+    } catch (error) {
+      const message = getErrorMessage(error).toLowerCase();
+      const receiptNotFound =
+        message.includes("receipt") && message.includes("not found");
+
+      if (!receiptNotFound) {
+        setHealthDependency(
+          getPendingSubmissionHealthDependencyKey(chainName),
+          false,
+          `awaiting resolution for ${pendingSubmission.label} submission ${pendingSubmission.txHash}`,
+        );
+        logger.warn(
+          "Waiting for previously submitted transaction resolution before allowing new live submissions",
+          {
+            chain: chainName,
+            operation: pendingSubmission.operation,
+            pool: pendingSubmission.pool,
+            txHash: pendingSubmission.txHash,
+            label: pendingSubmission.label,
+            submissionMode: pendingSubmission.mode,
+            bundleHash: pendingSubmission.bundleHash,
+            targetBlock: pendingSubmission.targetBlock?.toString(),
+            error: getErrorMessage(error),
+          },
+        );
+        return false;
+      }
+
+      let currentBlock: bigint;
+      try {
+        currentBlock = await publicClient.getBlockNumber();
+      } catch (blockError) {
+        setHealthDependency(
+          getPendingSubmissionHealthDependencyKey(chainName),
+          false,
+          `awaiting resolution for ${pendingSubmission.label} submission ${pendingSubmission.txHash}`,
+        );
+        logger.warn(
+          "Waiting for previously submitted transaction resolution before allowing new live submissions",
+          {
+            chain: chainName,
+            operation: pendingSubmission.operation,
+            pool: pendingSubmission.pool,
+            txHash: pendingSubmission.txHash,
+            label: pendingSubmission.label,
+            submissionMode: pendingSubmission.mode,
+            bundleHash: pendingSubmission.bundleHash,
+            targetBlock: pendingSubmission.targetBlock?.toString(),
+            error: getErrorMessage(blockError),
+          },
+        );
+        return false;
+      }
+
+      if (currentBlock > pendingSubmission.targetBlock + FLASHBOTS_PENDING_BLOCK_GRACE) {
+        setHealthDependency(getPendingSubmissionHealthDependencyKey(chainName), true);
+        logger.warn("Previously submitted Flashbots bundle missed its target block, clearing pending submission", {
+          chain: chainName,
+          operation: pendingSubmission.operation,
+          pool: pendingSubmission.pool,
+          txHash: pendingSubmission.txHash,
+          label: pendingSubmission.label,
+          bundleHash: pendingSubmission.bundleHash,
+          targetBlock: pendingSubmission.targetBlock.toString(),
+          currentBlock: currentBlock.toString(),
+        });
+        return true;
+      }
+
+      setHealthDependency(
+        getPendingSubmissionHealthDependencyKey(chainName),
+        false,
+        `awaiting resolution for ${pendingSubmission.label} submission ${pendingSubmission.txHash}`,
+      );
+      logger.warn(
+        "Waiting for previously submitted transaction resolution before allowing new live submissions",
+        {
+          chain: chainName,
+          operation: pendingSubmission.operation,
+          pool: pendingSubmission.pool,
+          txHash: pendingSubmission.txHash,
+          label: pendingSubmission.label,
+          submissionMode: pendingSubmission.mode,
+          bundleHash: pendingSubmission.bundleHash,
+          targetBlock: pendingSubmission.targetBlock?.toString(),
+          currentBlock: currentBlock.toString(),
+          error: getErrorMessage(error),
+        },
+      );
+      return false;
+    }
+  }
+
   try {
     const receipt = await waitForConfirmedReceipt(
       publicClient,
@@ -475,6 +597,142 @@ async function resolvePendingSubmission(
       ...pendingSubmission,
       ...error.pendingSubmission,
     };
+
+    if (
+      refreshedPendingSubmission.mode === "private-rpc" &&
+      refreshedPendingSubmission.account &&
+      refreshedPendingSubmission.nonce !== undefined &&
+      refreshedPendingSubmission.submittedAtMs !== undefined
+    ) {
+      const ageMs = Date.now() - refreshedPendingSubmission.submittedAtMs;
+
+      if (ageMs >= PRIVATE_RPC_PENDING_EXPIRY_MS) {
+        try {
+          const [latestNonce, pendingNonce] = await Promise.all([
+            publicClient.getTransactionCount({
+              address: refreshedPendingSubmission.account,
+              blockTag: "latest",
+            }),
+            publicClient.getTransactionCount({
+              address: refreshedPendingSubmission.account,
+              blockTag: "pending",
+            }),
+          ]);
+
+          if (latestNonce > refreshedPendingSubmission.nonce) {
+            setHealthDependency(getPendingSubmissionHealthDependencyKey(chainName), true);
+            logger.warn(
+              "Previously submitted private RPC transaction consumed its nonce without a visible receipt, clearing pending submission",
+              {
+                chain: chainName,
+                operation: refreshedPendingSubmission.operation,
+                pool: refreshedPendingSubmission.pool,
+                txHash: refreshedPendingSubmission.txHash,
+                label: refreshedPendingSubmission.label,
+                account: refreshedPendingSubmission.account,
+                nonce: refreshedPendingSubmission.nonce.toString(),
+                latestNonce: latestNonce.toString(),
+                pendingNonce: pendingNonce.toString(),
+                ageMs,
+              },
+            );
+            return true;
+          }
+
+          if (pendingNonce > refreshedPendingSubmission.nonce) {
+            setHealthDependency(
+              getPendingSubmissionHealthDependencyKey(chainName),
+              false,
+              `awaiting resolution for ${refreshedPendingSubmission.label} submission ${refreshedPendingSubmission.txHash}`,
+            );
+            logger.warn(
+              "Waiting for previously submitted transaction resolution before allowing new live submissions",
+              {
+                chain: chainName,
+                operation: refreshedPendingSubmission.operation,
+                pool: refreshedPendingSubmission.pool,
+                txHash: refreshedPendingSubmission.txHash,
+                label: refreshedPendingSubmission.label,
+                submissionMode: refreshedPendingSubmission.mode,
+                account: refreshedPendingSubmission.account,
+                nonce: refreshedPendingSubmission.nonce.toString(),
+                latestNonce: latestNonce.toString(),
+                pendingNonce: pendingNonce.toString(),
+                ageMs,
+                error: error.message,
+              },
+            );
+            return false;
+          }
+
+          if (
+            latestNonce < refreshedPendingSubmission.nonce ||
+            pendingNonce < refreshedPendingSubmission.nonce
+          ) {
+            setHealthDependency(
+              getPendingSubmissionHealthDependencyKey(chainName),
+              false,
+              `awaiting resolution for ${refreshedPendingSubmission.label} submission ${refreshedPendingSubmission.txHash}`,
+            );
+            logger.warn(
+              "Waiting for previously submitted transaction resolution before allowing new live submissions",
+              {
+                chain: chainName,
+                operation: refreshedPendingSubmission.operation,
+                pool: refreshedPendingSubmission.pool,
+                txHash: refreshedPendingSubmission.txHash,
+                label: refreshedPendingSubmission.label,
+                submissionMode: refreshedPendingSubmission.mode,
+                account: refreshedPendingSubmission.account,
+                nonce: refreshedPendingSubmission.nonce.toString(),
+                latestNonce: latestNonce.toString(),
+                pendingNonce: pendingNonce.toString(),
+                ageMs,
+                error: error.message,
+              },
+            );
+            return false;
+          }
+
+          setHealthDependency(getPendingSubmissionHealthDependencyKey(chainName), true);
+          logger.warn(
+            "Previously submitted private RPC transaction exceeded its confirmation deadline without consuming its nonce, clearing pending submission as dropped",
+            {
+              chain: chainName,
+              operation: refreshedPendingSubmission.operation,
+              pool: refreshedPendingSubmission.pool,
+              txHash: refreshedPendingSubmission.txHash,
+              label: refreshedPendingSubmission.label,
+              account: refreshedPendingSubmission.account,
+              nonce: refreshedPendingSubmission.nonce.toString(),
+              latestNonce: latestNonce.toString(),
+              pendingNonce: pendingNonce.toString(),
+              ageMs,
+            },
+          );
+          return true;
+        } catch (nonceError) {
+          setHealthDependency(
+            getPendingSubmissionHealthDependencyKey(chainName),
+            false,
+            `awaiting resolution for ${refreshedPendingSubmission.label} submission ${refreshedPendingSubmission.txHash}`,
+          );
+          logger.warn("Waiting for previously submitted transaction resolution before allowing new live submissions", {
+            chain: chainName,
+            operation: refreshedPendingSubmission.operation,
+            pool: refreshedPendingSubmission.pool,
+            txHash: refreshedPendingSubmission.txHash,
+            label: refreshedPendingSubmission.label,
+            submissionMode: refreshedPendingSubmission.mode,
+            account: refreshedPendingSubmission.account,
+            nonce: refreshedPendingSubmission.nonce.toString(),
+            ageMs,
+            error: getErrorMessage(nonceError),
+          });
+          return false;
+        }
+      }
+    }
 
     setHealthDependency(
       getPendingSubmissionHealthDependencyKey(chainName),
@@ -524,7 +782,25 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
   const KICK_RESERVE_AUCTION_GAS_UNITS = 120_000n;
   const MAX_CONSECUTIVE_TRANSIENT_ERRORS = 5;
   let consecutiveTransientErrors = 0;
-  let pendingSubmission: PendingSubmissionState | null = null;
+  let pendingSubmission = await loadPendingSubmission(chainName);
+
+  if (pendingSubmission) {
+    setHealthDependency(
+      getPendingSubmissionHealthDependencyKey(chainName),
+      false,
+      `awaiting resolution for ${pendingSubmission.label} submission ${pendingSubmission.txHash}`,
+    );
+    logger.warn("Recovered unresolved submission from disk, pausing live submissions until it is resolved", {
+      chain: chainName,
+      operation: pendingSubmission.operation,
+      pool: pendingSubmission.pool,
+      txHash: pendingSubmission.txHash,
+      label: pendingSubmission.label,
+      submissionMode: pendingSubmission.mode,
+      bundleHash: pendingSubmission.bundleHash,
+      targetBlock: pendingSubmission.targetBlock?.toString(),
+    });
+  }
 
   while (!shutdownRequested) {
     try {
@@ -538,6 +814,7 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
           await sleep(config.polling.idleIntervalMs);
           continue;
         }
+        await clearPersistedPendingSubmission(chainName);
         pendingSubmission = null;
       } else {
         setHealthDependency(getPendingSubmissionHealthDependencyKey(chainName), true);
@@ -738,6 +1015,7 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
           );
           if (pending) {
             pendingSubmission = pending;
+            await savePendingSubmission(chainName, pendingSubmission);
             pauseFurtherLiveSubmissions = true;
             continue;
           }
@@ -867,6 +1145,7 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
             );
             if (pending) {
               pendingSubmission = pending;
+              await savePendingSubmission(chainName, pendingSubmission);
               pauseFurtherLiveSubmissions = true;
               continue;
             }

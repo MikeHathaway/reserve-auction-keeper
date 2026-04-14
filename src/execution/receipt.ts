@@ -33,6 +33,9 @@ export function createPendingSubmission(
     bundleHash: submission?.bundleHash,
     targetBlock: submission?.targetBlock,
     privateSubmission: submission?.privateSubmission,
+    account: submission?.account,
+    nonce: submission?.nonce,
+    submittedAtMs: submission?.submittedAtMs,
   };
 }
 

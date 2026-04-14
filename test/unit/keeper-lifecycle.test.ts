@@ -38,6 +38,9 @@ const {
   mockCreateWalletClient,
   mockHttp,
   mockPrivateKeyToAccount,
+  mockLoadPendingSubmission,
+  mockSavePendingSubmission,
+  mockClearPendingSubmission,
 } = vi.hoisted(() => {
   const mockGetPricesForQuoteTokens = vi.fn();
 
@@ -106,6 +109,7 @@ const {
     mockCreatePublicClient: vi.fn(() => ({
       getGasPrice: vi.fn().mockResolvedValue(1n),
       getBlock: vi.fn().mockResolvedValue({ baseFeePerGas: 1n }),
+      getBlockNumber: vi.fn().mockResolvedValue(1n),
     })),
     mockCreateWalletClient: vi.fn(() => ({
       account: { address: WALLET_ADDRESS },
@@ -114,6 +118,9 @@ const {
     mockPrivateKeyToAccount: vi.fn(() => ({
       address: WALLET_ADDRESS,
     })),
+    mockLoadPendingSubmission: vi.fn().mockResolvedValue(null),
+    mockSavePendingSubmission: vi.fn().mockResolvedValue(undefined),
+    mockClearPendingSubmission: vi.fn().mockResolvedValue(undefined),
   };
 });
 
@@ -204,6 +211,12 @@ vi.mock("../../src/utils/health.js", () => ({
   setHealthDependency: mockSetHealthDependency,
   clearAllHealthDependencies: mockClearAllHealthDependencies,
   setHealthy: mockSetHealthy,
+}));
+
+vi.mock("../../src/execution/pending-submission-store.js", () => ({
+  loadPendingSubmission: mockLoadPendingSubmission,
+  savePendingSubmission: mockSavePendingSubmission,
+  clearPendingSubmission: mockClearPendingSubmission,
 }));
 
 import { requestShutdown, startKeeper } from "../../src/keeper.js";
@@ -692,6 +705,15 @@ describe("keeper lifecycle", () => {
       false,
       `awaiting resolution for execution submission ${submittedTxHash}`,
     );
+    expect(mockSavePendingSubmission).toHaveBeenCalledWith(
+      "base",
+      expect.objectContaining({
+        txHash: submittedTxHash,
+        label: "execution",
+        operation: "execution",
+        pool: firstPoolState.pool,
+      }),
+    );
     expect(mockLogger.warn).toHaveBeenCalledWith(
       "Submitted transaction outcome is unresolved, pausing further live submissions",
       expect.objectContaining({
@@ -779,6 +801,15 @@ describe("keeper lifecycle", () => {
       false,
       `awaiting resolution for takeReserves submission ${submittedTxHash}`,
     );
+    expect(mockSavePendingSubmission).toHaveBeenCalledWith(
+      "base",
+      expect.objectContaining({
+        txHash: submittedTxHash,
+        label: "takeReserves",
+        operation: "execution",
+        pool: firstPoolState.pool,
+      }),
+    );
     expect(mockLogger.warn).toHaveBeenCalledWith(
       "Submitted transaction outcome is unresolved, pausing further live submissions",
       expect.objectContaining({
@@ -791,6 +822,132 @@ describe("keeper lifecycle", () => {
         bundleHash: "bundle-1",
         targetBlock: "101",
         privateSubmission: true,
+      }),
+    );
+  });
+
+  it("clears a persisted missed flashbots bundle instead of pausing forever", async () => {
+    const persistedPool = "0x6666666666666666666666666666666666666666";
+    mockLoadPendingSubmission.mockResolvedValueOnce({
+      txHash: `0x${"cc".repeat(32)}`,
+      label: "takeReserves",
+      mode: "flashbots",
+      bundleHash: "bundle-1",
+      targetBlock: 100n,
+      privateSubmission: true,
+      operation: "execution",
+      pool: persistedPool,
+    });
+    mockCreatePublicClient.mockImplementation(() => ({
+      getGasPrice: vi.fn().mockResolvedValue(1n),
+      getBlock: vi.fn().mockResolvedValue({ baseFeePerGas: 1n }),
+      getTransactionReceipt: vi.fn().mockRejectedValue(new Error("transaction receipt not found")),
+      getBlockNumber: vi.fn().mockResolvedValue(103n),
+    }));
+    mockGetPoolReserveStates.mockImplementationOnce(async () => {
+      requestShutdown();
+      return [];
+    });
+
+    await startKeeper({
+      ...makeConfig(),
+      dryRun: false,
+    });
+
+    expect(mockClearPendingSubmission).toHaveBeenCalledWith("base");
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      "Previously submitted Flashbots bundle missed its target block, clearing pending submission",
+      expect.objectContaining({
+        chain: "base",
+        pool: persistedPool,
+        targetBlock: "100",
+        currentBlock: "103",
+      }),
+    );
+  });
+
+  it("reloads a persisted unresolved submission on startup before attempting new work", async () => {
+    const persistedTxHash = `0x${"dd".repeat(32)}`;
+    mockLoadPendingSubmission.mockResolvedValueOnce({
+      txHash: persistedTxHash,
+      label: "execution",
+      mode: "private-rpc",
+      privateSubmission: true,
+      operation: "execution",
+      pool: "0x6666666666666666666666666666666666666666",
+    });
+    mockCreatePublicClient.mockImplementation(() => ({
+      getGasPrice: vi.fn().mockResolvedValue(1n),
+      getBlock: vi.fn().mockResolvedValue({ baseFeePerGas: 1n }),
+      getBlockNumber: vi.fn().mockResolvedValue(1n),
+      waitForTransactionReceipt: vi.fn().mockImplementationOnce(async () => {
+        requestShutdown();
+        throw new Error("still pending");
+      }),
+    }));
+
+    await startKeeper({
+      ...makeConfig(),
+      dryRun: false,
+    });
+
+    expect(mockDiscoverPools).not.toHaveBeenCalled();
+    expect(mockFundedStrategy.execute).not.toHaveBeenCalled();
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      "Recovered unresolved submission from disk, pausing live submissions until it is resolved",
+      expect.objectContaining({
+        chain: "base",
+        txHash: persistedTxHash,
+        label: "execution",
+      }),
+    );
+  });
+
+  it("clears a persisted stale private-rpc submission instead of pausing forever", async () => {
+    const persistedPool = "0x6666666666666666666666666666666666666666";
+    const persistedTxHash = `0x${"ee".repeat(32)}`;
+    mockLoadPendingSubmission.mockResolvedValueOnce({
+      txHash: persistedTxHash,
+      label: "execution",
+      mode: "private-rpc",
+      privateSubmission: true,
+      account: WALLET_ADDRESS,
+      nonce: 5n,
+      submittedAtMs: Date.now() - 121_000,
+      operation: "execution",
+      pool: persistedPool,
+    });
+    mockCreatePublicClient.mockImplementation(() => ({
+      getGasPrice: vi.fn().mockResolvedValue(1n),
+      getBlock: vi.fn().mockResolvedValue({ baseFeePerGas: 1n }),
+      getBlockNumber: vi.fn().mockResolvedValue(1n),
+      waitForTransactionReceipt: vi.fn().mockImplementationOnce(async () => {
+        throw new Error("still pending");
+      }),
+      getTransactionCount: vi.fn().mockImplementation(({ blockTag }: { blockTag?: string }) => {
+        if (blockTag === "pending") return Promise.resolve(5n);
+        return Promise.resolve(5n);
+      }),
+    }));
+    mockDiscoverPools.mockResolvedValue([persistedPool]);
+    mockGetPoolReserveStates.mockImplementationOnce(async () => {
+      requestShutdown();
+      return [];
+    });
+
+    await startKeeper({
+      ...makeConfig(),
+      dryRun: false,
+    });
+
+    expect(mockClearPendingSubmission).toHaveBeenCalledWith("base");
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      "Previously submitted private RPC transaction exceeded its confirmation deadline without consuming its nonce, clearing pending submission as dropped",
+      expect.objectContaining({
+        chain: "base",
+        pool: persistedPool,
+        txHash: persistedTxHash,
+        nonce: "5",
       }),
     );
   });
