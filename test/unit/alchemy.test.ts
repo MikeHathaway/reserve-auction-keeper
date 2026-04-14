@@ -124,4 +124,68 @@ describe("alchemy prices", () => {
 
     expect(mockFetch).toHaveBeenCalledTimes(1);
   });
+
+  it("accepts a large repricing after a second consistent observation", async () => {
+    const confirmedAddress = "0x3333333333333333333333333333333333333333";
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-31T00:00:00.000Z"));
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        data: [
+          {
+            network: NETWORK,
+            address: confirmedAddress.toLowerCase(),
+            prices: [{ currency: "USD", value: "0.003", lastUpdatedAt: new Date().toISOString() }],
+            error: null,
+          },
+        ],
+      }),
+    });
+
+    const client = createAlchemyPricesClient("test-key");
+    await expect(client.getPrices(NETWORK, [confirmedAddress])).resolves.toEqual(
+      new Map([[confirmedAddress, 0.003]]),
+    );
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 1);
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        data: [
+          {
+            network: NETWORK,
+            address: confirmedAddress.toLowerCase(),
+            prices: [{ currency: "USD", value: "0.01", lastUpdatedAt: new Date().toISOString() }],
+            error: null,
+          },
+        ],
+      }),
+    });
+    await expect(client.getPrices(NETWORK, [confirmedAddress])).resolves.toEqual(
+      new Map([[confirmedAddress, null]]),
+    );
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 1);
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        data: [
+          {
+            network: NETWORK,
+            address: confirmedAddress.toLowerCase(),
+            prices: [{ currency: "USD", value: "0.0102", lastUpdatedAt: new Date().toISOString() }],
+            error: null,
+          },
+        ],
+      }),
+    });
+    await expect(client.getPrices(NETWORK, [confirmedAddress])).resolves.toEqual(
+      new Map([[confirmedAddress, 0.0102]]),
+    );
+  });
 });

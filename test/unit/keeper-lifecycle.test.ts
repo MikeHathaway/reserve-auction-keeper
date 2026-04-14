@@ -25,9 +25,14 @@ const {
   mockCreateFundedStrategy,
   mockCreateFlashArbStrategy,
   mockEvaluateGasCost,
+  mockGetNextBlockSafeFeeCapOverrides,
+  mockGetNextBlockSafeGasPriceWei,
   mockIsNearProfitableAfterCosts,
   mockIsProfitableAfterCosts,
   mockSumEstimatedCostsUsd,
+  mockSetHealthDependency,
+  mockClearAllHealthDependencies,
+  mockSetHealthy,
   mockLogger,
   mockCreatePublicClient,
   mockCreateWalletClient,
@@ -55,12 +60,14 @@ const {
       supportsLiveSubmission: true,
       submit: vi.fn(),
       isHealthy: vi.fn().mockResolvedValue(true),
+      preflightLiveSubmissionReadiness: vi.fn().mockResolvedValue(true),
     })),
     mockCreatePrivateRpcSubmitter: vi.fn(() => ({
       name: "private-rpc",
       supportsLiveSubmission: true,
       submit: vi.fn(),
       isHealthy: vi.fn().mockResolvedValue(true),
+      preflightLiveSubmissionReadiness: vi.fn().mockResolvedValue(true),
     })),
     mockFundedStrategy: {
       name: "funded",
@@ -78,9 +85,17 @@ const {
       isAboveCeiling: false,
       estimatedCostUsd: 0.01,
     })),
+    mockGetNextBlockSafeFeeCapOverrides: vi.fn((gasPrice: bigint) => ({
+      maxFeePerGas: gasPrice,
+      maxPriorityFeePerGas: gasPrice,
+    })),
+    mockGetNextBlockSafeGasPriceWei: vi.fn((gasPrice: bigint) => gasPrice),
     mockIsNearProfitableAfterCosts: vi.fn(() => false),
     mockIsProfitableAfterCosts: vi.fn(() => false),
     mockSumEstimatedCostsUsd: vi.fn((...costs: number[]) => costs.reduce((sum, cost) => sum + cost, 0)),
+    mockSetHealthDependency: vi.fn(),
+    mockClearAllHealthDependencies: vi.fn(),
+    mockSetHealthy: vi.fn(),
     mockLogger: {
       info: vi.fn(),
       warn: vi.fn(),
@@ -90,6 +105,7 @@ const {
     },
     mockCreatePublicClient: vi.fn(() => ({
       getGasPrice: vi.fn().mockResolvedValue(1n),
+      getBlock: vi.fn().mockResolvedValue({ baseFeePerGas: 1n }),
     })),
     mockCreateWalletClient: vi.fn(() => ({
       account: { address: WALLET_ADDRESS },
@@ -172,6 +188,8 @@ vi.mock("../../src/execution/private-rpc.js", () => ({
 
 vi.mock("../../src/execution/gas.js", () => ({
   evaluateGasCost: mockEvaluateGasCost,
+  getNextBlockSafeFeeCapOverrides: mockGetNextBlockSafeFeeCapOverrides,
+  getNextBlockSafeGasPriceWei: mockGetNextBlockSafeGasPriceWei,
   isNearProfitableAfterCosts: mockIsNearProfitableAfterCosts,
   isProfitableAfterCosts: mockIsProfitableAfterCosts,
   sumEstimatedCostsUsd: mockSumEstimatedCostsUsd,
@@ -179,9 +197,17 @@ vi.mock("../../src/execution/gas.js", () => ({
 
 vi.mock("../../src/utils/logger.js", () => ({
   logger: mockLogger,
+  formatErrorForLogs: (error: unknown) => error instanceof Error ? error.message : String(error),
+}));
+
+vi.mock("../../src/utils/health.js", () => ({
+  setHealthDependency: mockSetHealthDependency,
+  clearAllHealthDependencies: mockClearAllHealthDependencies,
+  setHealthy: mockSetHealthy,
 }));
 
 import { requestShutdown, startKeeper } from "../../src/keeper.js";
+import { PendingSubmissionError } from "../../src/execution/receipt.js";
 
 function makeConfig(): AppConfig {
   return {
@@ -211,6 +237,7 @@ function makeConfig(): AppConfig {
         },
         rpcUrl: "http://127.0.0.1:8545",
         privateRpcUrl: "http://127.0.0.1:9545",
+        privateRpcTrusted: true,
         pools: [],
       },
     ],
@@ -246,6 +273,21 @@ function makeConfig(): AppConfig {
 describe("keeper lifecycle", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+
+    mockCreatePrivateRpcSubmitter.mockImplementation(() => ({
+      name: "private-rpc",
+      supportsLiveSubmission: true,
+      submit: vi.fn(),
+      isHealthy: vi.fn().mockResolvedValue(true),
+      preflightLiveSubmissionReadiness: vi.fn().mockResolvedValue(true),
+    }));
+    mockCreateFlashbotsSubmitter.mockImplementation(() => ({
+      name: "flashbots",
+      supportsLiveSubmission: true,
+      submit: vi.fn(),
+      isHealthy: vi.fn().mockResolvedValue(true),
+      preflightLiveSubmissionReadiness: vi.fn().mockResolvedValue(true),
+    }));
 
     mockDiscoverPools.mockResolvedValue([]);
     mockGetPoolReserveStates.mockResolvedValue([]);
@@ -310,6 +352,32 @@ describe("keeper lifecycle", () => {
         error: "fetch failed",
       }),
     );
+    expect(mockLogger.alert).not.toHaveBeenCalled();
+    expect(mockSetHealthDependency).not.toHaveBeenCalledWith(
+      "rpc:base",
+      false,
+      expect.any(String),
+    );
+    expect(mockSetHealthDependency).toHaveBeenCalledWith("rpc:base", true);
+  });
+
+  it("marks public RPC health unhealthy after repeated transient loop failures and recovers on success", async () => {
+    mockGetPoolReserveStates
+      .mockRejectedValueOnce(new Error("fetch failed"))
+      .mockRejectedValueOnce(new Error("fetch failed again"))
+      .mockImplementationOnce(async () => {
+        requestShutdown();
+        return [];
+      });
+
+    await startKeeper(makeConfig());
+
+    expect(mockSetHealthDependency).toHaveBeenCalledWith(
+      "rpc:base",
+      false,
+      "public RPC transient failures: 2; last error: fetch failed again",
+    );
+    expect(mockSetHealthDependency).toHaveBeenCalledWith("rpc:base", true);
     expect(mockLogger.alert).not.toHaveBeenCalled();
   });
 
@@ -429,6 +497,350 @@ describe("keeper lifecycle", () => {
     await startKeeper(makeConfig());
 
     expect(mockGetPoolReserveStates).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails startup preflight when live submission is unhealthy", async () => {
+    const unhealthySubmitter = {
+      name: "private-rpc",
+      supportsLiveSubmission: true,
+      submit: vi.fn(),
+      isHealthy: vi.fn().mockResolvedValue(false),
+      preflightLiveSubmissionReadiness: vi.fn().mockResolvedValue(false),
+    };
+    mockCreatePrivateRpcSubmitter.mockReturnValue(unhealthySubmitter);
+
+    await expect(startKeeper({
+      ...makeConfig(),
+      dryRun: false,
+    })).rejects.toThrow("Live private-rpc submission is unhealthy for base. Refusing startup.");
+
+    expect(unhealthySubmitter.preflightLiveSubmissionReadiness).toHaveBeenCalledTimes(1);
+    expect(mockDiscoverPools).not.toHaveBeenCalled();
+  });
+
+  it("pauses further live submissions for the current cycle when submitter health degrades mid-cycle", async () => {
+    const firstPoolState = {
+      pool: "0x6666666666666666666666666666666666666666",
+      quoteToken: "0x5555555555555555555555555555555555555555",
+      quoteTokenScale: 1_000_000_000_000n,
+      quoteTokenSymbol: "USDC",
+      reserves: 0n,
+      claimableReserves: 0n,
+      claimableReservesRemaining: parseEther("1"),
+      auctionPrice: parseEther("2"),
+      timeRemaining: 3600n,
+      hasActiveAuction: true,
+      isKickable: false,
+    };
+    const secondPoolState = {
+      ...firstPoolState,
+      pool: "0x7777777777777777777777777777777777777777",
+    };
+    const flashbotsSubmitter = {
+      name: "flashbots",
+      supportsLiveSubmission: true,
+      submit: vi.fn(),
+      isHealthy: vi.fn()
+        .mockResolvedValueOnce(true)
+        .mockResolvedValueOnce(false)
+        .mockImplementation(async () => {
+          requestShutdown();
+          return false;
+        }),
+      preflightLiveSubmissionReadiness: vi.fn().mockResolvedValue(true),
+    };
+    mockCreateFlashbotsSubmitter.mockReturnValue(flashbotsSubmitter);
+    mockDiscoverPools.mockResolvedValue([firstPoolState.pool, secondPoolState.pool]);
+    mockGetPoolReserveStates.mockResolvedValue([firstPoolState, secondPoolState]);
+    mockGetAuctionPrices.mockResolvedValue(new Map([
+      [firstPoolState.pool, {
+        pool: firstPoolState.pool,
+        auctionPrice: parseEther("2"),
+        auctionPriceFormatted: "2.0",
+        timeRemaining: 3600n,
+        timeRemainingHours: 1,
+      }],
+      [secondPoolState.pool, {
+        pool: secondPoolState.pool,
+        auctionPrice: parseEther("2"),
+        auctionPriceFormatted: "2.0",
+        timeRemaining: 3600n,
+        timeRemainingHours: 1,
+      }],
+    ]));
+    mockGetPricesForQuoteTokens.mockResolvedValue(new Map([
+      ["USDC", {
+        ajnaPriceUsd: 0.2,
+        quoteTokenPriceUsd: 1,
+        source: "coingecko",
+        isStale: false,
+      }],
+    ]));
+    mockFundedStrategy.estimateProfit.mockResolvedValue(1);
+    mockFundedStrategy.canExecute.mockResolvedValue(true);
+    mockFundedStrategy.execute.mockRejectedValue(new Error("relay unavailable"));
+    mockIsProfitableAfterCosts.mockReturnValue(true);
+
+    await startKeeper({
+      ...makeConfig(),
+      dryRun: false,
+      chains: [
+        {
+          ...makeConfig().chains[0],
+          chainConfig: {
+            ...makeConfig().chains[0].chainConfig,
+            mevMethod: "flashbots",
+          },
+          privateRpcUrl: undefined,
+          privateRpcTrusted: false,
+        },
+      ],
+    });
+
+    expect(mockFundedStrategy.execute).toHaveBeenCalledTimes(1);
+    expect(flashbotsSubmitter.isHealthy).toHaveBeenCalledTimes(3);
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      "Submission endpoint became unhealthy mid-cycle, pausing further live submissions",
+      expect.objectContaining({
+        chain: "base",
+        submitter: "flashbots",
+        operation: "execution",
+        pool: firstPoolState.pool,
+      }),
+    );
+  });
+
+  it("pauses further live submissions when a submitted transaction receipt cannot be confirmed", async () => {
+    const firstPoolState = {
+      pool: "0x6666666666666666666666666666666666666666",
+      quoteToken: "0x5555555555555555555555555555555555555555",
+      quoteTokenScale: 1_000_000_000_000n,
+      quoteTokenSymbol: "USDC",
+      reserves: 0n,
+      claimableReserves: 0n,
+      claimableReservesRemaining: parseEther("1"),
+      auctionPrice: parseEther("2"),
+      timeRemaining: 3600n,
+      hasActiveAuction: true,
+      isKickable: false,
+    };
+    const secondPoolState = {
+      ...firstPoolState,
+      pool: "0x7777777777777777777777777777777777777777",
+    };
+    const submittedTxHash = `0x${"aa".repeat(32)}`;
+    const waitForTransactionReceipt = vi.fn().mockImplementationOnce(async () => {
+      requestShutdown();
+      throw new Error("receipt timed out");
+    });
+
+    mockCreatePublicClient.mockImplementation(() => ({
+      getGasPrice: vi.fn().mockResolvedValue(1n),
+      getBlock: vi.fn().mockResolvedValue({ baseFeePerGas: 1n }),
+      waitForTransactionReceipt,
+    }));
+    mockDiscoverPools.mockResolvedValue([firstPoolState.pool, secondPoolState.pool]);
+    mockGetPoolReserveStates.mockResolvedValue([firstPoolState, secondPoolState]);
+    mockGetAuctionPrices.mockResolvedValue(new Map([
+      [firstPoolState.pool, {
+        pool: firstPoolState.pool,
+        auctionPrice: parseEther("2"),
+        auctionPriceFormatted: "2.0",
+        timeRemaining: 3600n,
+        timeRemainingHours: 1,
+      }],
+      [secondPoolState.pool, {
+        pool: secondPoolState.pool,
+        auctionPrice: parseEther("2"),
+        auctionPriceFormatted: "2.0",
+        timeRemaining: 3600n,
+        timeRemainingHours: 1,
+      }],
+    ]));
+    mockGetPricesForQuoteTokens.mockResolvedValue(new Map([
+      ["USDC", {
+        ajnaPriceUsd: 0.2,
+        quoteTokenPriceUsd: 1,
+        source: "coingecko",
+        isStale: false,
+      }],
+    ]));
+    mockFundedStrategy.estimateProfit.mockResolvedValue(1);
+    mockFundedStrategy.canExecute.mockResolvedValue(true);
+    mockFundedStrategy.execute.mockRejectedValueOnce(
+      new PendingSubmissionError(
+        {
+          txHash: submittedTxHash,
+          label: "execution",
+          mode: "private-rpc",
+          privateSubmission: true,
+        },
+        `Failed while waiting for execution receipt ${submittedTxHash}: receipt timed out`,
+      ),
+    );
+    mockIsProfitableAfterCosts.mockReturnValue(true);
+
+    await startKeeper({
+      ...makeConfig(),
+      dryRun: false,
+    });
+
+    expect(mockFundedStrategy.execute).toHaveBeenCalledTimes(1);
+    expect(waitForTransactionReceipt).toHaveBeenCalledTimes(1);
+    expect(mockSetHealthDependency).toHaveBeenCalledWith(
+      "submission:base",
+      false,
+      `awaiting resolution for execution submission ${submittedTxHash}`,
+    );
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      "Submitted transaction outcome is unresolved, pausing further live submissions",
+      expect.objectContaining({
+        chain: "base",
+        operation: "execution",
+        pool: firstPoolState.pool,
+        txHash: submittedTxHash,
+        label: "execution",
+      }),
+    );
+  });
+
+  it("pauses further live submissions when a flashbots bundle was accepted but monitoring failed", async () => {
+    const firstPoolState = {
+      pool: "0x6666666666666666666666666666666666666666",
+      quoteToken: "0x5555555555555555555555555555555555555555",
+      quoteTokenScale: 1_000_000_000_000n,
+      quoteTokenSymbol: "USDC",
+      reserves: 0n,
+      claimableReserves: 0n,
+      claimableReservesRemaining: parseEther("1"),
+      auctionPrice: parseEther("2"),
+      timeRemaining: 3600n,
+      hasActiveAuction: true,
+      isKickable: false,
+    };
+    const secondPoolState = {
+      ...firstPoolState,
+      pool: "0x7777777777777777777777777777777777777777",
+    };
+    const submittedTxHash = `0x${"bb".repeat(32)}`;
+
+    mockDiscoverPools.mockResolvedValue([firstPoolState.pool, secondPoolState.pool]);
+    mockGetPoolReserveStates.mockResolvedValue([firstPoolState, secondPoolState]);
+    mockGetAuctionPrices.mockResolvedValue(new Map([
+      [firstPoolState.pool, {
+        pool: firstPoolState.pool,
+        auctionPrice: parseEther("2"),
+        auctionPriceFormatted: "2.0",
+        timeRemaining: 3600n,
+        timeRemainingHours: 1,
+      }],
+      [secondPoolState.pool, {
+        pool: secondPoolState.pool,
+        auctionPrice: parseEther("2"),
+        auctionPriceFormatted: "2.0",
+        timeRemaining: 3600n,
+        timeRemainingHours: 1,
+      }],
+    ]));
+    mockGetPricesForQuoteTokens.mockResolvedValue(new Map([
+      ["USDC", {
+        ajnaPriceUsd: 0.2,
+        quoteTokenPriceUsd: 1,
+        source: "coingecko",
+        isStale: false,
+      }],
+    ]));
+    mockFundedStrategy.estimateProfit.mockResolvedValue(1);
+    mockFundedStrategy.canExecute.mockResolvedValue(true);
+    mockFundedStrategy.execute.mockImplementationOnce(async () => {
+      requestShutdown();
+      throw new PendingSubmissionError(
+        {
+          txHash: submittedTxHash,
+          label: "takeReserves",
+          mode: "flashbots",
+          bundleHash: "bundle-1",
+          targetBlock: 101n,
+          privateSubmission: true,
+        },
+        `Flashbots bundle submission accepted by relay, but inclusion monitoring failed: gateway timeout`,
+      );
+    });
+    mockIsProfitableAfterCosts.mockReturnValue(true);
+
+    await startKeeper({
+      ...makeConfig(),
+      dryRun: false,
+    });
+
+    expect(mockFundedStrategy.execute).toHaveBeenCalledTimes(1);
+    expect(mockSetHealthDependency).toHaveBeenCalledWith(
+      "submission:base",
+      false,
+      `awaiting resolution for takeReserves submission ${submittedTxHash}`,
+    );
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      "Submitted transaction outcome is unresolved, pausing further live submissions",
+      expect.objectContaining({
+        chain: "base",
+        operation: "execution",
+        pool: firstPoolState.pool,
+        txHash: submittedTxHash,
+        label: "takeReserves",
+        submissionMode: "flashbots",
+        bundleHash: "bundle-1",
+        targetBlock: "101",
+        privateSubmission: true,
+      }),
+    );
+  });
+
+  it("marks pricing unhealthy when the active quote-token price is stale", async () => {
+    const activePoolState = {
+      pool: "0x6666666666666666666666666666666666666666",
+      quoteToken: "0x5555555555555555555555555555555555555555",
+      quoteTokenScale: 1_000_000_000_000n,
+      quoteTokenSymbol: "USDC",
+      reserves: 0n,
+      claimableReserves: 0n,
+      claimableReservesRemaining: parseEther("1"),
+      auctionPrice: parseEther("2"),
+      timeRemaining: 3600n,
+      hasActiveAuction: true,
+      isKickable: false,
+    };
+    mockDiscoverPools.mockResolvedValue([activePoolState.pool]);
+    mockGetPoolReserveStates
+      .mockResolvedValueOnce([activePoolState])
+      .mockImplementationOnce(async () => {
+        requestShutdown();
+        return [];
+      });
+    mockGetAuctionPrices.mockResolvedValue(new Map([
+      [activePoolState.pool, {
+        pool: activePoolState.pool,
+        auctionPrice: parseEther("2"),
+        auctionPriceFormatted: "2.0",
+        timeRemaining: 3600n,
+        timeRemainingHours: 1,
+      }],
+    ]));
+    mockGetPricesForQuoteTokens.mockResolvedValue(new Map([
+      ["USDC", {
+        ajnaPriceUsd: 0.2,
+        quoteTokenPriceUsd: 1,
+        source: "coingecko",
+        isStale: true,
+      }],
+    ]));
+
+    await startKeeper(makeConfig());
+
+    expect(mockSetHealthDependency).toHaveBeenCalledWith(
+      "pricing:base",
+      false,
+      "stale prices: USDC",
+    );
   });
 
   it("fails fast when alchemy-only pricing cannot price the chain AJNA token", async () => {

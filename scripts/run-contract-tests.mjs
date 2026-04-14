@@ -1,6 +1,7 @@
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
+import { createRestrictedChildEnv } from "./child-process-env.mjs";
 
 const TEST_DIR = join(process.cwd(), "contracts", "test");
 
@@ -33,7 +34,10 @@ for (const testFile of tests) {
   const result = spawnSync(
     "forge",
     ["test", "--offline", "--match-path", testFile],
-    { stdio: "inherit" },
+    {
+      stdio: "inherit",
+      env: createRestrictedChildEnv(),
+    },
   );
   if (result.status !== 0) {
     process.exit(result.status ?? 1);

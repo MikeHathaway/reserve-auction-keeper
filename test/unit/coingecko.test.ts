@@ -175,6 +175,37 @@ describe("coingecko", () => {
     expect(price).toBeNull();
   });
 
+  it("accepts a large repricing after a second consistent observation", async () => {
+    const tokenId = "confirmed-deviation-token";
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-31T00:00:00.000Z"));
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ [tokenId]: { usd: 0.003 } }),
+    });
+
+    const client = createCoingeckoClient("test-key");
+    await expect(client.getPrice(tokenId)).resolves.toBe(0.003);
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 1);
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ [tokenId]: { usd: 0.01 } }),
+    });
+    await expect(client.getPrice(tokenId)).resolves.toBeNull();
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 1);
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ [tokenId]: { usd: 0.0102 } }),
+    });
+    await expect(client.getPrice(tokenId)).resolves.toBe(0.0102);
+  });
+
   it("handles network errors gracefully", async () => {
     mockFetch.mockRejectedValueOnce(new Error("Network error"));
 

@@ -1,7 +1,9 @@
 import "dotenv/config";
-import { readdirSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
+import { createEphemeralFoundryRpcConfig } from "./foundry-rpc-config.mjs";
+import { createRestrictedChildEnv } from "./child-process-env.mjs";
 
 const TEST_DIR = join(process.cwd(), "contracts", "test");
 const DEFAULT_BASE_FORK_BLOCK = "44533293";
@@ -29,10 +31,11 @@ function resolveBaseRpcUrl() {
   }
 
   const provider = process.env.RPC_PROVIDER;
-  const apiKey = process.env.RPC_API_KEY;
+  const apiKey = process.env.RPC_API_KEY?.trim() ||
+    (process.env.RPC_API_KEY_FILE ? readFileSync(process.env.RPC_API_KEY_FILE, "utf-8").trim() : "");
   if (!provider || !apiKey) {
     throw new Error(
-      "BASE_RPC_URL or RPC_PROVIDER/RPC_API_KEY is required for Base fork tests.",
+      "BASE_RPC_URL or RPC_PROVIDER/RPC_API_KEY or RPC_API_KEY_FILE is required for Base fork tests.",
     );
   }
 
@@ -51,22 +54,38 @@ if (tests.length === 0) {
 
 const rpcUrl = resolveBaseRpcUrl();
 const forkBlock = process.env.BASE_FORK_BLOCK || DEFAULT_BASE_FORK_BLOCK;
+const { configPath, cleanup } = createEphemeralFoundryRpcConfig("base", rpcUrl);
+let exitCode = 0;
 
-for (const testFile of tests) {
-  const result = spawnSync(
-    "forge",
-    [
-      "test",
-      "--match-path",
-      testFile,
-      "--fork-url",
-      rpcUrl,
-      "--fork-block-number",
-      forkBlock,
-    ],
-    { stdio: "inherit" },
-  );
-  if (result.status !== 0) {
-    process.exit(result.status ?? 1);
+try {
+  for (const testFile of tests) {
+    const result = spawnSync(
+      "forge",
+      [
+        "test",
+        "--config-path",
+        configPath,
+        "--match-path",
+        testFile,
+        "--fork-url",
+        "base",
+        "--fork-block-number",
+        forkBlock,
+      ],
+      {
+        stdio: "inherit",
+        env: createRestrictedChildEnv(),
+      },
+    );
+    if (result.status !== 0) {
+      exitCode = result.status ?? 1;
+      break;
+    }
   }
+} finally {
+  cleanup();
+}
+
+if (exitCode !== 0) {
+  process.exit(exitCode);
 }

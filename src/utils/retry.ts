@@ -1,4 +1,4 @@
-import { logger } from "./logger.js";
+import { formatErrorForLogs, logger } from "./logger.js";
 
 export interface RetryOptions {
   retries?: number;
@@ -16,7 +16,7 @@ function defaultSleep(ms: number): Promise<void> {
 }
 
 export function getErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  return formatErrorForLogs(error);
 }
 
 export function isTransientRpcError(error: unknown): boolean {

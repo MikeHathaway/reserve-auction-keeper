@@ -12,3 +12,4 @@ broadcast/
 .codex
 *.dot
 .context/
+.gstack/

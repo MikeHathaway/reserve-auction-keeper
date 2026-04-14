@@ -1,6 +1,7 @@
 import "dotenv/config";
 import { createPublicClient, http } from "viem";
 import { mainnet } from "viem/chains";
+import { readFileSync } from "node:fs";
 
 const FACTORY_ABI = [
   {
@@ -37,6 +38,7 @@ const WHITELISTED_QUOTES = {
   USDC: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
   DAI: "0x6B175474E89094C44Da98b954EedeAC495271d0F",
 };
+const URL_PATTERN = /https?:\/\/[^\s"'`]+/g;
 
 const POOL_INFO_UTILS_ABI = [
   {
@@ -58,7 +60,8 @@ function resolveMainnetRpcUrl() {
   if (process.env.MAINNET_RPC_URL) return process.env.MAINNET_RPC_URL;
 
   const provider = process.env.RPC_PROVIDER;
-  const apiKey = process.env.RPC_API_KEY;
+  const apiKey = process.env.RPC_API_KEY?.trim() ||
+    (process.env.RPC_API_KEY_FILE ? readFileSync(process.env.RPC_API_KEY_FILE, "utf-8").trim() : "");
   if (provider === "alchemy" && apiKey) {
     return `https://eth-mainnet.g.alchemy.com/v2/${apiKey}`;
   }
@@ -66,6 +69,27 @@ function resolveMainnetRpcUrl() {
     return `https://mainnet.infura.io/v3/${apiKey}`;
   }
   return DEFAULT_MAINNET_RPC_URL;
+}
+
+function redactUrls(text) {
+  return text.replace(URL_PATTERN, (value) => {
+    try {
+      const parsed = new URL(value);
+      const suffix = parsed.pathname && parsed.pathname !== "/" ? "/..." : "";
+      return `${parsed.protocol}//${parsed.host}${suffix}`;
+    } catch {
+      return "[redacted-url]";
+    }
+  });
+}
+
+function formatErrorForLogs(error) {
+  if (error instanceof Error) {
+    const label = error.name && error.name !== "Error" ? `${error.name}: ` : "";
+    return redactUrls(`${label}${error.message}`);
+  }
+
+  return redactUrls(String(error));
 }
 
 function getThreshold(symbol) {
@@ -229,6 +253,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error(error);
+  console.error(formatErrorForLogs(error));
   process.exit(1);
 });

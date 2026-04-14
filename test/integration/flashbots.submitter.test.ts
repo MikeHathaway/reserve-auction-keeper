@@ -12,6 +12,7 @@ import {
 import { privateKeyToAccount } from "viem/accounts";
 import { mainnet } from "viem/chains";
 import { createFlashbotsSubmitter } from "../../src/execution/flashbots.js";
+import { createRestrictedChildEnv } from "../../scripts/child-process-env.mjs";
 
 const LOCAL_HOST = "127.0.0.1";
 const ANVIL_DEFAULT_PRIVATE_KEY =
@@ -170,6 +171,7 @@ describe("flashbots submitter integration", () => {
       ],
       {
         stdio: ["ignore", "pipe", "pipe"],
+        env: createRestrictedChildEnv(),
       },
     );
 

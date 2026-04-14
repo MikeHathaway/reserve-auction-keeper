@@ -12,6 +12,7 @@ import type {
   TxResult,
 } from "./interface.js";
 import type { MevSubmitter } from "../execution/mev-submitter.js";
+import type { FeeCapOverrides } from "../execution/gas.js";
 import { POOL_ABI } from "../contracts/abis/index.js";
 import {
   calculateReserveTakeAjnaCost,
@@ -21,6 +22,7 @@ import {
   captureExecutionSnapshot,
   finalizeExecutionSettlement,
 } from "../execution/settlement.js";
+import { waitForConfirmedReceipt } from "../execution/receipt.js";
 import { logger } from "../utils/logger.js";
 
 interface FundedStrategyConfig {
@@ -254,7 +256,12 @@ export function createFundedStrategy(
     return plan;
   }
 
-  async function ensureApproval(pool: Address, amount: bigint): Promise<void> {
+  async function ensureApproval(
+    pool: Address,
+    amount: bigint,
+    gasPriceWei?: bigint,
+    feeCapOverrides?: FeeCapOverrides,
+  ): Promise<void> {
     const allowance = await getAllowance(pool);
 
     if (allowance >= amount) return;
@@ -291,6 +298,8 @@ export function createFundedStrategy(
       functionName: "approve",
       args: [pool, amount],
       account: walletAddress,
+      gasPriceWei,
+      feeCapOverrides,
     });
 
     if (!submission.txHash) {
@@ -299,7 +308,12 @@ export function createFundedStrategy(
       );
     }
 
-    const receipt = await publicClient.waitForTransactionReceipt({ hash: submission.txHash });
+    const receipt = await waitForConfirmedReceipt(
+      publicClient,
+      submission.txHash,
+      "approval",
+      { submission },
+    );
     if (receipt.status !== "success") {
       throw new Error(`Approval transaction ${submission.txHash} reverted on-chain.`);
     }
@@ -364,7 +378,12 @@ export function createFundedStrategy(
       }
 
       // Ensure approval
-      await ensureApproval(poolState.pool, plan.ajnaCost);
+      await ensureApproval(
+        poolState.pool,
+        plan.ajnaCost,
+        ctx.gasPriceWei,
+        ctx.feeCapOverrides,
+      );
 
       logger.info("Executing takeReserves", {
         pool: poolState.pool,
@@ -416,6 +435,8 @@ export function createFundedStrategy(
         functionName: "takeReserves",
         args: [plan.amount],
         account: walletAddress,
+        gasPriceWei: ctx.gasPriceWei,
+        feeCapOverrides: ctx.feeCapOverrides,
       });
 
       logger.info("takeReserves submitted", {
@@ -438,6 +459,7 @@ export function createFundedStrategy(
       const realized = await finalizeExecutionSettlement(beforeSettlement, {
         publicClient,
         txHash: submission.txHash,
+        submission,
         walletAddress,
         ajnaToken,
         quoteToken: poolState.quoteToken,

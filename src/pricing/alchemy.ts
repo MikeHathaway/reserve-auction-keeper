@@ -1,9 +1,15 @@
 import type { Address } from "viem";
 import { logger } from "../utils/logger.js";
+import { fetchWithTimeout } from "../utils/http.js";
 
 interface CachedPrice {
   price: number;
   updatedAt: number;
+}
+
+interface PendingPriceConfirmation {
+  price: number;
+  observedAt: number;
 }
 
 interface AlchemyPricePoint {
@@ -24,8 +30,11 @@ interface AlchemyPricesResponse {
 }
 
 const cache = new Map<string, CachedPrice>();
+const pendingPriceConfirmations = new Map<string, PendingPriceConfirmation>();
 const STALE_THRESHOLD_MS = 5 * 60 * 1000;
 const MAX_DEVIATION_PERCENT = 20;
+const CONFIRMATION_MATCH_THRESHOLD_PERCENT = 5;
+const CONFIRMATION_WINDOW_MS = 30 * 60 * 1000;
 
 export interface AlchemyPricesClient {
   getPrices(network: string, addresses: Address[]): Promise<Map<Address, number | null>>;
@@ -40,6 +49,29 @@ function getCachedPrice(network: string, address: Address): number | null {
   const cached = cache.get(getCacheKey(network, address));
   if (!cached) return null;
   return cached.price;
+}
+
+function getPendingConfirmation(
+  network: string,
+  address: Address,
+): PendingPriceConfirmation | null {
+  const pending = pendingPriceConfirmations.get(getCacheKey(network, address));
+  if (!pending) return null;
+  if (Date.now() - pending.observedAt > CONFIRMATION_WINDOW_MS) {
+    pendingPriceConfirmations.delete(getCacheKey(network, address));
+    return null;
+  }
+  return pending;
+}
+
+function pricesAreCloseEnough(
+  left: number,
+  right: number,
+  thresholdPercent: number,
+): boolean {
+  if (left <= 0 || right <= 0) return false;
+  const divergence = Math.abs(left - right) / Math.max(left, right);
+  return divergence <= thresholdPercent / 100;
 }
 
 function parseUsdPrice(entry: AlchemyPriceEntry): { price: number; updatedAt: number } | null {
@@ -90,7 +122,7 @@ export function createAlchemyPricesClient(apiKey: string): AlchemyPricesClient {
     const requested = new Map(staleOrMissing.map((address) => [address.toLowerCase(), address]));
 
     try {
-      const response = await fetch(baseUrl, {
+      const response = await fetchWithTimeout(baseUrl, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -102,6 +134,7 @@ export function createAlchemyPricesClient(apiKey: string): AlchemyPricesClient {
             address: address.toLowerCase(),
           })),
         }),
+        label: "alchemy.price-fetch",
       });
 
       if (response.status === 429) {
@@ -164,7 +197,36 @@ export function createAlchemyPricesClient(apiKey: string): AlchemyPricesClient {
         if (cached) {
           const deviation = Math.abs(parsed.price - cached.price) / cached.price;
           if (deviation > MAX_DEVIATION_PERCENT / 100) {
-            logger.alert("Alchemy price deviation exceeds threshold", {
+            const pending = getPendingConfirmation(network, requestedAddress);
+            if (
+              pending &&
+              pricesAreCloseEnough(
+                pending.price,
+                parsed.price,
+                CONFIRMATION_MATCH_THRESHOLD_PERCENT,
+              )
+            ) {
+              cache.set(cacheKey, {
+                price: parsed.price,
+                updatedAt: parsed.updatedAt,
+              });
+              pendingPriceConfirmations.delete(cacheKey);
+              logger.warn("Confirmed Alchemy price jump after repeated observation", {
+                network,
+                address: requestedAddress,
+                oldPrice: cached.price,
+                confirmedPrice: parsed.price,
+                deviationPercent: (deviation * 100).toFixed(1),
+              });
+              results.set(requestedAddress, parsed.price);
+              continue;
+            }
+
+            pendingPriceConfirmations.set(cacheKey, {
+              price: parsed.price,
+              observedAt: Date.now(),
+            });
+            logger.alert("Alchemy price deviation exceeds threshold; awaiting confirmation", {
               network,
               address: requestedAddress,
               oldPrice: cached.price,
@@ -176,6 +238,7 @@ export function createAlchemyPricesClient(apiKey: string): AlchemyPricesClient {
           }
         }
 
+        pendingPriceConfirmations.delete(cacheKey);
         cache.set(cacheKey, {
           price: parsed.price,
           updatedAt: parsed.updatedAt,

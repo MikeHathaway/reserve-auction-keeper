@@ -3,6 +3,8 @@
     "base": {
       "enabled": true,
       "rpcUrl": "https://base-mainnet.g.alchemy.com/v2/your_key",
+      "privateRpcUrl": "https://base-private-rpc.example",
+      "privateRpcTrusted": false,
       "quoteTokens": {
         "ALT": {
           "address": "0x0000000000000000000000000000000000000010",

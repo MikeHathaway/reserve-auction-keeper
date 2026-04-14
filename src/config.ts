@@ -2,7 +2,11 @@ import { z } from "zod";
 import { readFileSync } from "node:fs";
 import { isAddress, type Address, type Hex } from "viem";
 import { CHAIN_CONFIGS, buildRpcUrl, type ChainConfig, type RpcProvider } from "./chains/index.js";
-import { loadOptionalHexSecret, resolvePrivateKeyFromEnv } from "./utils/secrets.js";
+import {
+  loadOptionalHexSecret,
+  loadOptionalStringSecret,
+  resolvePrivateKeyFromEnv,
+} from "./utils/secrets.js";
 import {
   requiresAlchemyPricing,
   requiresCoingeckoPricing,
@@ -58,6 +62,7 @@ const chainConfigSchema = z.object({
   enabled: z.boolean().default(true),
   rpcUrl: z.string().url("RPC URL must be a valid URL").optional(),
   privateRpcUrl: z.string().url().optional(),
+  privateRpcTrusted: z.boolean().default(false),
   pools: z.array(addressSchema).default([]),
   quoteTokens: z.record(z.string().min(1), quoteTokenOverrideSchema).default({}),
 });
@@ -130,6 +135,7 @@ export interface ResolvedChainConfig {
   chainConfig: ChainConfig;
   rpcUrl: string;
   privateRpcUrl?: string;
+  privateRpcTrusted: boolean;
   pools: Address[];
 }
 
@@ -472,13 +478,25 @@ function validateEnabledFlashArbRoutes(
 }
 
 function loadEnvSecrets(priceProvider: PriceProvider): EnvSecrets {
-  // RPC provider: set RPC_PROVIDER (alchemy|infura) + RPC_API_KEY
+  // RPC provider: set RPC_PROVIDER (alchemy|infura) + RPC_API_KEY / RPC_API_KEY_FILE
   // and URLs are auto-constructed for all chains.
   const rpcProvider = process.env.RPC_PROVIDER as RpcProvider | undefined;
-  const rpcApiKey = process.env.RPC_API_KEY;
-  const coingeckoApiKey = process.env.COINGECKO_API_KEY;
+  const rpcApiKey = loadOptionalStringSecret(
+    process.env,
+    "RPC_API_KEY",
+    "RPC_API_KEY_FILE",
+  );
+  const coingeckoApiKey = loadOptionalStringSecret(
+    process.env,
+    "COINGECKO_API_KEY",
+    "COINGECKO_API_KEY_FILE",
+  );
   const coingeckoApiPlan = (process.env.COINGECKO_API_PLAN ?? "auto") as CoingeckoApiPlan;
-  const alchemyApiKey = process.env.ALCHEMY_API_KEY ||
+  const alchemyApiKey = loadOptionalStringSecret(
+    process.env,
+    "ALCHEMY_API_KEY",
+    "ALCHEMY_API_KEY_FILE",
+  ) ||
     (rpcProvider === "alchemy" ? rpcApiKey : undefined);
 
   if (!["auto", "demo", "pro"].includes(coingeckoApiPlan)) {
@@ -486,12 +504,14 @@ function loadEnvSecrets(priceProvider: PriceProvider): EnvSecrets {
   }
 
   if (requiresCoingeckoPricing(priceProvider) && !coingeckoApiKey) {
-    throw new Error("COINGECKO_API_KEY is required for the selected pricing provider");
+    throw new Error(
+      "COINGECKO_API_KEY or COINGECKO_API_KEY_FILE is required for the selected pricing provider",
+    );
   }
 
   if (requiresAlchemyPricing(priceProvider) && !alchemyApiKey) {
     throw new Error(
-      "ALCHEMY_API_KEY is required for the selected pricing provider unless RPC_PROVIDER=alchemy with RPC_API_KEY set",
+      "ALCHEMY_API_KEY or ALCHEMY_API_KEY_FILE is required for the selected pricing provider unless RPC_PROVIDER=alchemy with RPC_API_KEY or RPC_API_KEY_FILE set",
     );
   }
 
@@ -529,7 +549,7 @@ export function loadConfig(configPath: string): AppConfig {
 
     // RPC URL resolution priority:
     // 1. Explicit rpcUrl in config.json (per-chain override)
-    // 2. Auto-constructed from RPC_PROVIDER + RPC_API_KEY (one key, all chains)
+    // 2. Auto-constructed from RPC_PROVIDER + RPC_API_KEY / RPC_API_KEY_FILE (one key, all chains)
     // 3. Chain's default public RPC (free, rate-limited)
     const rpcUrl: string =
       chainFileConfig.rpcUrl ||
@@ -544,6 +564,7 @@ export function loadConfig(configPath: string): AppConfig {
       chainConfig: resolvedChainConfig,
       rpcUrl,
       privateRpcUrl,
+      privateRpcTrusted: chainFileConfig.privateRpcTrusted ?? false,
       pools: (chainFileConfig.pools || []) as Address[],
     });
   }

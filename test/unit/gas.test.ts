@@ -2,6 +2,8 @@ import { describe, it, expect, vi } from "vitest";
 import { parseGwei } from "viem";
 import {
   checkGasPrice,
+  getNextBlockSafeFeeCapOverrides,
+  getNextBlockSafeGasPriceWei,
   getRequiredProfitUsd,
   isNearProfitableAfterGas,
   isProfitableAfterGas,
@@ -46,6 +48,29 @@ describe("gas", () => {
     it("calculates the profit floor including margin", () => {
       expect(getRequiredProfitUsd(2, 5)).toBe(2.1);
       expect(getRequiredProfitUsd(10, 20)).toBe(12);
+    });
+  });
+
+  describe("getNextBlockSafeGasPriceWei", () => {
+    it("keeps the observed gas price when no base fee is available", () => {
+      expect(getNextBlockSafeGasPriceWei(parseGwei("10"))).toBe(parseGwei("10"));
+    });
+
+    it("pads the fee cap for worst-case next-block base fee growth", () => {
+      expect(
+        getNextBlockSafeGasPriceWei(parseGwei("30"), parseGwei("28")),
+      ).toBe(parseGwei("33.5"));
+    });
+  });
+
+  describe("getNextBlockSafeFeeCapOverrides", () => {
+    it("preserves the observed priority fee instead of hard-clamping it", () => {
+      expect(
+        getNextBlockSafeFeeCapOverrides(parseGwei("30"), parseGwei("28")),
+      ).toEqual({
+        maxFeePerGas: parseGwei("33.5"),
+        maxPriorityFeePerGas: parseGwei("2"),
+      });
     });
   });
 

@@ -1,6 +1,7 @@
 import "dotenv/config";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { readFileSync } from "node:fs";
 import net from "node:net";
 import {
   createPublicClient,
@@ -23,6 +24,8 @@ import { createFundedStrategy } from "../../src/strategies/funded.js";
 import { createPrivateRpcSubmitter } from "../../src/execution/private-rpc.js";
 import { setLogLevel } from "../../src/utils/logger.js";
 import type { AuctionContext } from "../../src/strategies/interface.js";
+import { createRestrictedChildEnv } from "../../scripts/child-process-env.mjs";
+import { createEphemeralFoundryRpcConfig } from "../../scripts/foundry-rpc-config.mjs";
 
 const FORK_BLOCK = 24_773_987;
 const TARGET_POOL = "0x9cdB48FcBd8241Bb75887AF04d3b1302c410F671";
@@ -53,7 +56,8 @@ function resolveMainnetRpcUrl(): string | null {
   if (process.env.MAINNET_RPC_URL) return process.env.MAINNET_RPC_URL;
 
   const provider = process.env.RPC_PROVIDER;
-  const apiKey = process.env.RPC_API_KEY;
+  const apiKey = process.env.RPC_API_KEY?.trim() ||
+    (process.env.RPC_API_KEY_FILE ? readFileSync(process.env.RPC_API_KEY_FILE, "utf-8").trim() : "");
   if (!provider || !apiKey) return null;
 
   if (provider === "alchemy") {
@@ -160,12 +164,14 @@ const describeMainnetFork = forkRpcUrl ? describe : describe.skip;
 describeMainnetFork("mainnet funded strategy e2e", () => {
   let anvilProcess: ChildProcessWithoutNullStreams | null = null;
   let rpcUrl = "";
+  let forkConfig: ReturnType<typeof createEphemeralFoundryRpcConfig> | null = null;
 
   beforeAll(async () => {
     setLogLevel("error");
 
     const port = await getFreePort();
     rpcUrl = `http://${LOCAL_RPC_HOST}:${port}`;
+    forkConfig = createEphemeralFoundryRpcConfig("mainnet", forkRpcUrl!);
 
     anvilProcess = spawn(
       "anvil",
@@ -175,7 +181,7 @@ describeMainnetFork("mainnet funded strategy e2e", () => {
         "--port",
         String(port),
         "--fork-url",
-        forkRpcUrl!,
+        "mainnet",
         "--fork-block-number",
         String(FORK_BLOCK),
         "--chain-id",
@@ -184,6 +190,8 @@ describeMainnetFork("mainnet funded strategy e2e", () => {
       ],
       {
         stdio: ["ignore", "pipe", "pipe"],
+        cwd: forkConfig.workdir,
+        env: createRestrictedChildEnv(),
       },
     );
 
@@ -202,6 +210,8 @@ describeMainnetFork("mainnet funded strategy e2e", () => {
       await waitForRpcReady(rpcUrl, 15_000);
     } catch (error) {
       anvilProcess.kill("SIGTERM");
+      forkConfig?.cleanup();
+      forkConfig = null;
       throw error;
     }
   });
@@ -211,6 +221,8 @@ describeMainnetFork("mainnet funded strategy e2e", () => {
     anvilProcess.kill("SIGTERM");
     await new Promise((resolve) => anvilProcess?.once("exit", resolve));
     anvilProcess = null;
+    forkConfig?.cleanup();
+    forkConfig = null;
   });
 
   it("discovers, kicks, and fills a reserve auction against a pinned mainnet fork", async () => {
@@ -293,7 +305,7 @@ describeMainnetFork("mainnet funded strategy e2e", () => {
       chainName: "mainnet",
     };
 
-    const submitter = createPrivateRpcSubmitter(publicClient, walletClient, rpcUrl);
+    const submitter = createPrivateRpcSubmitter(publicClient, walletClient, rpcUrl, true);
     const strategy = createFundedStrategy(
       publicClient,
       walletClient,

@@ -1,8 +1,14 @@
 import { logger } from "../utils/logger.js";
+import { fetchWithTimeout } from "../utils/http.js";
 
 interface CachedPrice {
   price: number;
   fetchedAt: number;
+}
+
+interface PendingPriceConfirmation {
+  price: number;
+  observedAt: number;
 }
 
 interface CoingeckoErrorResponse {
@@ -21,8 +27,11 @@ interface CoingeckoRequestConfig {
 }
 
 const cache = new Map<string, CachedPrice>();
+const pendingPriceConfirmations = new Map<string, PendingPriceConfirmation>();
 const STALE_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes
 const MAX_DEVIATION_PERCENT = 20;
+const CONFIRMATION_MATCH_THRESHOLD_PERCENT = 5;
+const CONFIRMATION_WINDOW_MS = 30 * 60 * 1000;
 
 export type CoingeckoApiPlan = "auto" | "demo" | "pro";
 
@@ -97,6 +106,26 @@ export function createCoingeckoClient(
     return cached.price;
   }
 
+  function getPendingConfirmation(tokenId: string): PendingPriceConfirmation | null {
+    const pending = pendingPriceConfirmations.get(tokenId);
+    if (!pending) return null;
+    if (Date.now() - pending.observedAt > CONFIRMATION_WINDOW_MS) {
+      pendingPriceConfirmations.delete(tokenId);
+      return null;
+    }
+    return pending;
+  }
+
+  function pricesAreCloseEnough(
+    left: number,
+    right: number,
+    thresholdPercent: number,
+  ): boolean {
+    if (left <= 0 || right <= 0) return false;
+    const divergence = Math.abs(left - right) / Math.max(left, right);
+    return divergence <= thresholdPercent / 100;
+  }
+
   async function getPrices(tokenIds: string[]): Promise<Map<string, number | null>> {
     const results = new Map<string, number | null>();
     const uniqueTokenIds = [...new Set(tokenIds)];
@@ -127,13 +156,14 @@ export function createCoingeckoClient(
       const requestConfig = getRequestConfig(activePlan);
 
       try {
-        const response = await fetch(
+        const response = await fetchWithTimeout(
           `${requestConfig.baseUrl}/simple/price?ids=${encodeURIComponent(staleOrMissing.join(","))}&vs_currencies=usd`,
           {
             headers: {
               [requestConfig.headerName]: apiKey,
               Accept: "application/json",
             },
+            label: "coingecko.price-fetch",
           },
         );
 
@@ -188,7 +218,32 @@ export function createCoingeckoClient(
           if (cached) {
             const deviation = Math.abs(price - cached.price) / cached.price;
             if (deviation > MAX_DEVIATION_PERCENT / 100) {
-              logger.alert("Price deviation exceeds threshold", {
+              const pending = getPendingConfirmation(tokenId);
+              if (
+                pending &&
+                pricesAreCloseEnough(
+                  pending.price,
+                  price,
+                  CONFIRMATION_MATCH_THRESHOLD_PERCENT,
+                )
+              ) {
+                cache.set(tokenId, { price, fetchedAt: now });
+                pendingPriceConfirmations.delete(tokenId);
+                logger.warn("Confirmed CoinGecko price jump after repeated observation", {
+                  tokenId,
+                  oldPrice: cached.price,
+                  confirmedPrice: price,
+                  deviationPercent: (deviation * 100).toFixed(1),
+                });
+                results.set(tokenId, price);
+                continue;
+              }
+
+              pendingPriceConfirmations.set(tokenId, {
+                price,
+                observedAt: now,
+              });
+              logger.alert("Price deviation exceeds threshold; awaiting confirmation", {
                 tokenId,
                 oldPrice: cached.price,
                 newPrice: price,
@@ -199,6 +254,7 @@ export function createCoingeckoClient(
             }
           }
 
+          pendingPriceConfirmations.delete(tokenId);
           cache.set(tokenId, { price, fetchedAt: now });
           results.set(tokenId, price);
         }

@@ -24,6 +24,7 @@ import {
   FLASH_ARB_EXECUTOR_V3_V2_ABI,
 } from "../contracts/abis/index.js";
 import {
+  calculateReserveAuctionFinalPrice,
   calculateReserveTakeAjnaCost,
   normalizeReserveTakeAmount,
 } from "../auction/math.js";
@@ -91,11 +92,12 @@ interface FlashArbCandidate {
   liquidityUsd: number;
   slippagePercent: number;
   hopCount: number;
+  routeGasEstimate: bigint;
   additionalExecutionGasUnits: bigint;
   swapPath: FlashArbSwapRouteConfig["path"];
 }
 
-type RouteContext = Pick<AuctionContext, "poolState" | "chainName"> | KickContext;
+type RouteContext = Pick<AuctionContext, "poolState" | "chainName" | "gasPriceWei"> | KickContext;
 
 type ResolvedSymbolRoute = {
   sources: FlashArbSourceConfig[];
@@ -129,10 +131,8 @@ export function createFlashArbStrategy(
 ): ExecutionStrategy {
   const walletAddress = walletClient.account!.address;
   const warnedKeys = new Set<string>();
-  const v3IdentityCache = new Map<Address, Promise<UniswapV3PoolIdentity>>();
-  const v2PairStateCache = new Map<Address, Promise<UniswapV2PairState>>();
-  let lastActiveCandidate: { key: string; candidate: FlashArbCandidate | null } | null = null;
-  let lastKickCandidate: { key: string; candidate: FlashArbCandidate | null } | null = null;
+  const activeCandidateCache = new WeakMap<AuctionContext, Promise<FlashArbCandidate | null>>();
+  const kickCandidateCache = new WeakMap<KickContext, Promise<FlashArbCandidate | null>>();
 
   function warnOnce(message: string, key: string, ctx: RouteContext) {
     if (warnedKeys.has(key)) return;
@@ -144,34 +144,6 @@ export function createFlashArbStrategy(
     });
   }
 
-  function getActiveContextKey(ctx: AuctionContext): string {
-    return [
-      "active",
-      ctx.chainName,
-      ctx.poolState.pool,
-      ctx.poolState.quoteTokenSymbol,
-      ctx.poolState.quoteTokenScale.toString(),
-      ctx.poolState.claimableReservesRemaining.toString(),
-      ctx.auctionPrice.toString(),
-      ctx.prices.quoteTokenPriceUsd.toString(),
-      ctx.prices.ajnaPriceUsd.toString(),
-    ].join(":");
-  }
-
-  function getKickContextKey(ctx: KickContext): string {
-    return [
-      "kick",
-      ctx.chainName,
-      ctx.poolState.pool,
-      ctx.poolState.quoteTokenSymbol,
-      ctx.poolState.quoteTokenScale.toString(),
-      ctx.poolState.claimableReserves.toString(),
-      ctx.poolState.auctionPrice.toString(),
-      ctx.prices.quoteTokenPriceUsd.toString(),
-      ctx.prices.ajnaPriceUsd.toString(),
-    ].join(":");
-  }
-
   function getSlippageBps(): bigint {
     return BigInt(Math.floor(config.maxSlippagePercent * 100));
   }
@@ -179,6 +151,32 @@ export function createFlashArbStrategy(
   function calculateV3FlashFee(borrowAmount: bigint, feePpm: bigint): bigint {
     return (borrowAmount * feePpm + UNISWAP_FEE_DENOMINATOR - 1n) /
       UNISWAP_FEE_DENOMINATOR;
+  }
+
+  function calculateMaxV2BorrowAmount(maxRepayAmount: bigint): bigint {
+    if (maxRepayAmount <= 0n) return 0n;
+
+    let borrowAmount = maxRepayAmount * 997n / 1000n;
+    while (borrowAmount > 0n && calculateUniswapV2RepayAmount(borrowAmount) > maxRepayAmount) {
+      borrowAmount -= 1n;
+    }
+    return borrowAmount;
+  }
+
+  function calculateMaxV3BorrowAmount(maxRepayAmount: bigint, feePpm: bigint): bigint {
+    if (maxRepayAmount <= 0n) return 0n;
+
+    let borrowAmount = maxRepayAmount * UNISWAP_FEE_DENOMINATOR /
+      (UNISWAP_FEE_DENOMINATOR + feePpm);
+    while (borrowAmount > 0n && borrowAmount + calculateV3FlashFee(borrowAmount, feePpm) > maxRepayAmount) {
+      borrowAmount -= 1n;
+    }
+    return borrowAmount;
+  }
+
+  function calculateMinimumProfitAjna(minProfitUsd: number, ajnaPriceUsd: number): bigint {
+    if (minProfitUsd <= 0 || ajnaPriceUsd <= 0) return 0n;
+    return BigInt(Math.ceil((minProfitUsd / ajnaPriceUsd) * 1e18));
   }
 
   function applySlippageFloor(amountOut: bigint): bigint {
@@ -199,6 +197,22 @@ export function createFlashArbStrategy(
     if (sourceProtocol === "uniswap-v3" && swapProtocol === "uniswap-v2") return "v3v2";
     if (sourceProtocol === "uniswap-v3" && swapProtocol === "uniswap-v3") return "v3v3";
     return null;
+  }
+
+  function calculateGasCostUsd(
+    gasUnits: bigint,
+    gasPriceWei?: bigint,
+  ): number {
+    if (!gasPriceWei || gasUnits <= 0n) return 0;
+    return Number(gasUnits * gasPriceWei) / 1e18 * config.nativeTokenPriceUsd;
+  }
+
+  function getCandidateNetProfitUsd(
+    candidate: FlashArbCandidate,
+    gasPriceWei?: bigint,
+  ): number {
+    return candidate.estimatedProfitUsd -
+      calculateGasCostUsd(candidate.additionalExecutionGasUnits, gasPriceWei);
   }
 
   function getRouteLabel(
@@ -239,32 +253,6 @@ export function createFlashArbStrategy(
     return { sources, swapRoutes };
   }
 
-  async function getV3PoolIdentity(poolAddress: Address): Promise<UniswapV3PoolIdentity> {
-    const cached = v3IdentityCache.get(poolAddress);
-    if (cached) return cached;
-
-    const pending = readUniswapV3PoolIdentity(publicClient, poolAddress)
-      .catch((error) => {
-        v3IdentityCache.delete(poolAddress);
-        throw error;
-      });
-    v3IdentityCache.set(poolAddress, pending);
-    return pending;
-  }
-
-  async function getV2PairState(pairAddress: Address): Promise<UniswapV2PairState> {
-    const cached = v2PairStateCache.get(pairAddress);
-    if (cached) return cached;
-
-    const pending = readUniswapV2PairState(publicClient, pairAddress)
-      .catch((error) => {
-        v2PairStateCache.delete(pairAddress);
-        throw error;
-      });
-    v2PairStateCache.set(pairAddress, pending);
-    return pending;
-  }
-
   async function getAjnaBalance(account: Address): Promise<bigint> {
     const balance = await publicClient.readContract({
       address: config.ajnaToken,
@@ -282,7 +270,7 @@ export function createFlashArbStrategy(
     if (source.protocol === "uniswap-v2") {
       let pairState: UniswapV2PairState;
       try {
-        pairState = await getV2PairState(source.address);
+        pairState = await readUniswapV2PairState(publicClient, source.address);
       } catch (error) {
         warnOnce(
           `Flash-arb Uniswap V2 flash source could not be inspected: ${error instanceof Error ? error.message : String(error)}`,
@@ -312,7 +300,7 @@ export function createFlashArbStrategy(
 
     let poolIdentity: UniswapV3PoolIdentity;
     try {
-      poolIdentity = await getV3PoolIdentity(source.address);
+      poolIdentity = await readUniswapV3PoolIdentity(publicClient, source.address);
     } catch (error) {
       warnOnce(
         `Flash-arb Uniswap V3 flash source could not be inspected: ${error instanceof Error ? error.message : String(error)}`,
@@ -359,6 +347,40 @@ export function createFlashArbStrategy(
       poolIdentity,
       availableBorrowAjna,
     };
+  }
+
+  async function memoizeActiveCandidate(
+    ctx: AuctionContext,
+    compute: () => Promise<FlashArbCandidate | null>,
+  ): Promise<FlashArbCandidate | null> {
+    const cached = activeCandidateCache.get(ctx);
+    if (cached) {
+      return cached;
+    }
+
+    const pending = compute().catch((error) => {
+      activeCandidateCache.delete(ctx);
+      throw error;
+    });
+    activeCandidateCache.set(ctx, pending);
+    return pending;
+  }
+
+  async function memoizeKickCandidate(
+    ctx: KickContext,
+    compute: () => Promise<FlashArbCandidate | null>,
+  ): Promise<FlashArbCandidate | null> {
+    const cached = kickCandidateCache.get(ctx);
+    if (cached) {
+      return cached;
+    }
+
+    const pending = compute().catch((error) => {
+      kickCandidateCache.delete(ctx);
+      throw error;
+    });
+    kickCandidateCache.set(ctx, pending);
+    return pending;
   }
 
   async function quoteSwapRoute(
@@ -428,8 +450,14 @@ export function createFlashArbStrategy(
   function isBetterCandidate(
     nextCandidate: FlashArbCandidate,
     currentBest: FlashArbCandidate | null,
+    gasPriceWei?: bigint,
   ): boolean {
     if (!currentBest) return true;
+    const nextNetProfitUsd = getCandidateNetProfitUsd(nextCandidate, gasPriceWei);
+    const currentNetProfitUsd = getCandidateNetProfitUsd(currentBest, gasPriceWei);
+    if (nextNetProfitUsd !== currentNetProfitUsd) {
+      return nextNetProfitUsd > currentNetProfitUsd;
+    }
     if (nextCandidate.estimatedProfitUsd !== currentBest.estimatedProfitUsd) {
       return nextCandidate.estimatedProfitUsd > currentBest.estimatedProfitUsd;
     }
@@ -568,11 +596,177 @@ export function createFlashArbStrategy(
           liquidityUsd,
           slippagePercent: quotedRoute.quote.slippagePercent,
           hopCount: quotedRoute.hopCount,
-          additionalExecutionGasUnits: FAMILY_ADDITIONAL_EXECUTION_GAS_UNITS[family],
+          routeGasEstimate: quotedRoute.quote.gasEstimate,
+          additionalExecutionGasUnits:
+            quotedRoute.quote.gasEstimate + FAMILY_ADDITIONAL_EXECUTION_GAS_UNITS[family],
           swapPath: swapRoute.path,
         };
 
-        if (isBetterCandidate(candidate, bestCandidate)) {
+        if (isBetterCandidate(candidate, bestCandidate, ctx.gasPriceWei)) {
+          bestCandidate = candidate;
+        }
+      }
+    }
+
+    return bestCandidate;
+  }
+
+  async function selectBestFutureKickCandidate(
+    ctx: KickContext,
+    quoteAmount: bigint,
+    prices: AuctionContext["prices"],
+    liquidityUsd: number,
+  ): Promise<FlashArbCandidate | null> {
+    const symbolRoute = resolveSymbolRoute(ctx);
+    if (!symbolRoute || !config.route) {
+      return null;
+    }
+
+    const requiredProfitAjna = calculateMinimumProfitAjna(
+      config.minProfitUsd,
+      prices.ajnaPriceUsd,
+    );
+    if (requiredProfitAjna === 0n) {
+      return null;
+    }
+
+    const sourceStateCache = new Map<string, Promise<EvaluatedSource | null>>();
+    const swapQuoteCache = new Map<string, Promise<SwapQuoteCacheValue | null>>();
+    const minimumReachableBorrowAmount = calculateReserveTakeAjnaCost(
+      quoteAmount,
+      calculateReserveAuctionFinalPrice(quoteAmount),
+    );
+    let bestCandidate: FlashArbCandidate | null = null;
+
+    for (const source of symbolRoute.sources) {
+      const sourceCacheKey = `${source.protocol}:${source.address}`;
+      const sourceStatePromise = sourceStateCache.get(sourceCacheKey) ||
+        inspectSource(ctx, source);
+      sourceStateCache.set(sourceCacheKey, sourceStatePromise);
+      const sourceState = await sourceStatePromise;
+      if (!sourceState) continue;
+
+      if (sourceState.availableBorrowAjna < minimumReachableBorrowAmount) {
+        logger.debug("Flash-arb kick candidate rejected because the flash source cannot cover even the final reserve-auction price", {
+          chain: ctx.chainName,
+          pool: ctx.poolState.pool,
+          flashSource: sourceState.sourceAddress,
+          sourceProtocol: sourceState.protocol,
+          minimumReachableBorrowAmount: formatEther(minimumReachableBorrowAmount),
+          availableBorrowAjna: formatEther(sourceState.availableBorrowAjna),
+        });
+        continue;
+      }
+
+      for (const swapRoute of symbolRoute.swapRoutes) {
+        const family = resolveExecutorFamily(source.protocol, swapRoute.protocol);
+        if (!family) continue;
+
+        const executorAddress = config.route.executors[family];
+        if (!executorAddress) {
+          warnOnce(
+            `Flash-arb executor missing for ${family} routes`,
+            `executor:${ctx.chainName}:${ctx.poolState.quoteTokenSymbol}:${family}`,
+            ctx,
+          );
+          continue;
+        }
+
+        if (
+          sourceState.protocol === "uniswap-v3" &&
+          swapRoute.protocol === "uniswap-v3" &&
+          pathReusesUniswapV3Pool(swapRoute.path, sourceState.poolIdentity)
+        ) {
+          warnOnce(
+            "Flash-arb swap path reuses the configured Uniswap V3 flash source and cannot execute during callback",
+            `flashPoolReuse:${ctx.chainName}:${ctx.poolState.quoteTokenSymbol}:${sourceState.sourceAddress}:${swapRoute.path}`,
+            ctx,
+          );
+          continue;
+        }
+
+        const swapQuoteCacheKey = swapRoute.protocol === "uniswap-v3"
+          ? `${swapRoute.protocol}:${swapRoute.path}`
+          : `${swapRoute.protocol}:${swapRoute.path.join(",")}`;
+        const swapQuotePromise = swapQuoteCache.get(swapQuoteCacheKey) ||
+          quoteSwapRoute(ctx, swapRoute, quoteAmount, prices);
+        swapQuoteCache.set(swapQuoteCacheKey, swapQuotePromise);
+        const quotedRoute = await swapQuotePromise;
+        if (!quotedRoute) continue;
+
+        if (quotedRoute.quote.slippagePercent > config.maxSlippagePercent) {
+          continue;
+        }
+
+        const minAjnaOut = applySlippageFloor(quotedRoute.quote.amountOut);
+        if (minAjnaOut <= requiredProfitAjna) {
+          continue;
+        }
+
+        const maxRepayAmount = minAjnaOut - requiredProfitAjna;
+        let borrowAmount = sourceState.protocol === "uniswap-v2"
+          ? calculateMaxV2BorrowAmount(maxRepayAmount)
+          : calculateMaxV3BorrowAmount(maxRepayAmount, sourceState.poolIdentity.fee);
+
+        if (borrowAmount === 0n) {
+          continue;
+        }
+
+        if (borrowAmount > sourceState.availableBorrowAjna) {
+          borrowAmount = sourceState.availableBorrowAjna;
+        }
+
+        if (borrowAmount < minimumReachableBorrowAmount) {
+          logger.debug("Flash-arb kick candidate rejected because the route would only be profitable below the reserve auction's final reachable price", {
+            chain: ctx.chainName,
+            pool: ctx.poolState.pool,
+            flashSource: sourceState.sourceAddress,
+            sourceProtocol: sourceState.protocol,
+            swapProtocol: swapRoute.protocol,
+            borrowAmount: formatEther(borrowAmount),
+            minimumReachableBorrowAmount: formatEther(minimumReachableBorrowAmount),
+          });
+          continue;
+        }
+
+        const repayAmount = sourceState.protocol === "uniswap-v2"
+          ? calculateUniswapV2RepayAmount(borrowAmount)
+          : borrowAmount + calculateV3FlashFee(borrowAmount, sourceState.poolIdentity.fee);
+        if (minAjnaOut <= repayAmount) {
+          continue;
+        }
+
+        const estimatedProfitAjna = minAjnaOut - repayAmount;
+        if (estimatedProfitAjna < requiredProfitAjna) {
+          continue;
+        }
+        const estimatedProfitUsd = Math.max(
+          config.minProfitUsd,
+          Number(formatEther(estimatedProfitAjna)) * prices.ajnaPriceUsd,
+        );
+
+        const candidate: FlashArbCandidate = {
+          family,
+          executorAddress,
+          flashSourceAddress: sourceState.sourceAddress,
+          sourceProtocol: source.protocol,
+          swapProtocol: swapRoute.protocol,
+          quoteAmount,
+          borrowAmount,
+          repayAmount,
+          minAjnaOut,
+          quotedAjnaOut: quotedRoute.quote.amountOut,
+          estimatedProfitUsd,
+          liquidityUsd,
+          slippagePercent: quotedRoute.quote.slippagePercent,
+          hopCount: quotedRoute.hopCount,
+          routeGasEstimate: quotedRoute.quote.gasEstimate,
+          additionalExecutionGasUnits:
+            quotedRoute.quote.gasEstimate + FAMILY_ADDITIONAL_EXECUTION_GAS_UNITS[family],
+          swapPath: swapRoute.path,
+        };
+
+        if (isBetterCandidate(candidate, bestCandidate, ctx.gasPriceWei)) {
           bestCandidate = candidate;
         }
       }
@@ -582,97 +776,88 @@ export function createFlashArbStrategy(
   }
 
   async function evaluateActiveCandidate(ctx: AuctionContext): Promise<FlashArbCandidate | null> {
-    const key = getActiveContextKey(ctx);
-    if (lastActiveCandidate?.key === key) {
-      return lastActiveCandidate.candidate;
-    }
+    return memoizeActiveCandidate(ctx, async () => {
+      if (!ctx.poolState.hasActiveAuction || ctx.auctionPrice === 0n) {
+        return null;
+      }
 
-    if (!ctx.poolState.hasActiveAuction || ctx.auctionPrice === 0n) {
-      lastActiveCandidate = { key, candidate: null };
-      return null;
-    }
+      const quoteAmount = normalizeReserveTakeAmount(
+        ctx.poolState.claimableReservesRemaining,
+        ctx.poolState.quoteTokenScale,
+      );
+      if (quoteAmount === 0n) {
+        return null;
+      }
 
-    const quoteAmount = normalizeReserveTakeAmount(
-      ctx.poolState.claimableReservesRemaining,
-      ctx.poolState.quoteTokenScale,
-    );
-    if (quoteAmount === 0n) {
-      lastActiveCandidate = { key, candidate: null };
-      return null;
-    }
+      const liquidityUsd =
+        Number(formatEther(quoteAmount)) * ctx.prices.quoteTokenPriceUsd;
+      if (liquidityUsd < config.minLiquidityUsd) {
+        return null;
+      }
 
-    const liquidityUsd =
-      Number(formatEther(quoteAmount)) * ctx.prices.quoteTokenPriceUsd;
-    if (liquidityUsd < config.minLiquidityUsd) {
-      lastActiveCandidate = { key, candidate: null };
-      return null;
-    }
+      const borrowAmount = calculateReserveTakeAjnaCost(
+        quoteAmount,
+        ctx.auctionPrice,
+      );
+      if (borrowAmount === 0n) {
+        return null;
+      }
 
-    const borrowAmount = calculateReserveTakeAjnaCost(
-      quoteAmount,
-      ctx.auctionPrice,
-    );
-    if (borrowAmount === 0n) {
-      lastActiveCandidate = { key, candidate: null };
-      return null;
-    }
-
-    const candidate = await selectBestCandidate(
-      ctx,
-      quoteAmount,
-      borrowAmount,
-      ctx.prices,
-      liquidityUsd,
-    );
-    lastActiveCandidate = { key, candidate };
-    return candidate;
+      return selectBestCandidate(
+        ctx,
+        quoteAmount,
+        borrowAmount,
+        ctx.prices,
+        liquidityUsd,
+      );
+    });
   }
 
   async function evaluateKickCandidate(ctx: KickContext): Promise<FlashArbCandidate | null> {
-    const key = getKickContextKey(ctx);
-    if (lastKickCandidate?.key === key) {
-      return lastKickCandidate.candidate;
-    }
+    return memoizeKickCandidate(ctx, async () => {
+      if (config.minProfitUsd <= 0 || ctx.prices.ajnaPriceUsd <= 0) {
+        return null;
+      }
 
-    if (config.minProfitUsd <= 0 || ctx.prices.ajnaPriceUsd <= 0) {
-      lastKickCandidate = { key, candidate: null };
-      return null;
-    }
+      const quoteAmount = normalizeReserveTakeAmount(
+        ctx.poolState.claimableReserves,
+        ctx.poolState.quoteTokenScale,
+      );
+      if (quoteAmount === 0n) {
+        return null;
+      }
 
-    const quoteAmount = normalizeReserveTakeAmount(
-      ctx.poolState.claimableReserves,
-      ctx.poolState.quoteTokenScale,
-    );
-    if (quoteAmount === 0n) {
-      lastKickCandidate = { key, candidate: null };
-      return null;
-    }
+      const liquidityUsd =
+        Number(formatEther(quoteAmount)) * ctx.prices.quoteTokenPriceUsd;
+      if (liquidityUsd < config.minLiquidityUsd) {
+        return null;
+      }
 
-    const liquidityUsd =
-      Number(formatEther(quoteAmount)) * ctx.prices.quoteTokenPriceUsd;
-    if (liquidityUsd < config.minLiquidityUsd) {
-      lastKickCandidate = { key, candidate: null };
-      return null;
-    }
+      if (ctx.poolState.auctionPrice === 0n) {
+        return selectBestFutureKickCandidate(
+          ctx,
+          quoteAmount,
+          ctx.prices,
+          liquidityUsd,
+        );
+      }
 
-    const borrowAmount = calculateReserveTakeAjnaCost(
-      quoteAmount,
-      ctx.poolState.auctionPrice,
-    );
-    if (borrowAmount === 0n) {
-      lastKickCandidate = { key, candidate: null };
-      return null;
-    }
+      const borrowAmount = calculateReserveTakeAjnaCost(
+        quoteAmount,
+        ctx.poolState.auctionPrice,
+      );
+      if (borrowAmount === 0n) {
+        return null;
+      }
 
-    const candidate = await selectBestCandidate(
-      ctx,
-      quoteAmount,
-      borrowAmount,
-      ctx.prices,
-      liquidityUsd,
-    );
-    lastKickCandidate = { key, candidate };
-    return candidate;
+      return selectBestCandidate(
+        ctx,
+        quoteAmount,
+        borrowAmount,
+        ctx.prices,
+        liquidityUsd,
+      );
+    });
   }
 
   function getExecutorInvocation(
@@ -744,6 +929,8 @@ export function createFlashArbStrategy(
         estimatedProfitUsd: candidate.estimatedProfitUsd.toFixed(4),
         liquidityUsd: candidate.liquidityUsd.toFixed(2),
         slippagePercent: candidate.slippagePercent.toFixed(2),
+        routeGasEstimate: candidate.routeGasEstimate.toString(),
+        additionalExecutionGasUnits: candidate.additionalExecutionGasUnits.toString(),
         maxSlippagePercent: config.maxSlippagePercent,
         minLiquidityUsd: config.minLiquidityUsd,
         dryRun: config.dryRun,
@@ -773,6 +960,8 @@ export function createFlashArbStrategy(
         quoteAmount: formatEther(candidate.quoteAmount),
         borrowAmount: formatEther(candidate.borrowAmount),
         minAjnaOut: formatEther(candidate.minAjnaOut),
+        routeGasEstimate: candidate.routeGasEstimate.toString(),
+        additionalExecutionGasUnits: candidate.additionalExecutionGasUnits.toString(),
         dryRun: config.dryRun,
       });
 
@@ -809,6 +998,8 @@ export function createFlashArbStrategy(
         functionName: "executeFlashArb",
         args: invocation.args,
         account: walletAddress,
+        gasPriceWei: ctx.gasPriceWei,
+        feeCapOverrides: ctx.feeCapOverrides,
       });
 
       if (!submission.txHash) {
@@ -820,6 +1011,7 @@ export function createFlashArbStrategy(
       const realized = await finalizeExecutionSettlement(beforeSettlement, {
         publicClient,
         txHash: submission.txHash,
+        submission,
         walletAddress,
         ajnaToken: config.ajnaToken,
         quoteToken: ctx.poolState.quoteToken,

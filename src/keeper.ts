@@ -25,14 +25,22 @@ import { createFlashArbStrategy } from "./strategies/flash-arb.js";
 import type { ExecutionStrategy, AuctionContext } from "./strategies/interface.js";
 import { createFlashbotsSubmitter } from "./execution/flashbots.js";
 import { createPrivateRpcSubmitter } from "./execution/private-rpc.js";
-import type { MevSubmitter } from "./execution/mev-submitter.js";
+import type { MevSubmitter, PendingSubmission, SubmissionResult } from "./execution/mev-submitter.js";
+import { PendingSubmissionError, waitForConfirmedReceipt } from "./execution/receipt.js";
 import {
   evaluateGasCost,
+  getNextBlockSafeFeeCapOverrides,
+  getNextBlockSafeGasPriceWei,
   isNearProfitableAfterCosts,
   isProfitableAfterCosts,
   sumEstimatedCostsUsd,
 } from "./execution/gas.js";
 import { getErrorMessage, isTransientRpcError } from "./utils/retry.js";
+import {
+  clearAllHealthDependencies,
+  setHealthDependency,
+  setHealthy,
+} from "./utils/health.js";
 import { logger } from "./utils/logger.js";
 
 let shutdownRequested = false;
@@ -40,6 +48,7 @@ let shutdownRequested = false;
 export function requestShutdown() {
   if (shutdownRequested) return;
   shutdownRequested = true;
+  setHealthy(false);
   logger.info("Shutdown requested, finishing current cycle...");
 }
 
@@ -50,6 +59,146 @@ interface ChainKeeper {
   strategy: ExecutionStrategy;
   submitter: MevSubmitter;
   pools: Address[];
+}
+
+interface PendingSubmissionState extends PendingSubmission {
+  operation: "execution" | "reserve-auction kick";
+  pool: Address;
+}
+
+function getSubmitterHealthDependencyKey(keeper: ChainKeeper): string {
+  return `submitter:${keeper.chainConfig.chainConfig.name}:${keeper.submitter.name}`;
+}
+
+function getPricingHealthDependencyKey(chainName: string): string {
+  return `pricing:${chainName}`;
+}
+
+function getRpcHealthDependencyKey(chainName: string): string {
+  return `rpc:${chainName}`;
+}
+
+function getPendingSubmissionHealthDependencyKey(chainName: string): string {
+  return `submission:${chainName}`;
+}
+
+function refreshPricingHealth(
+  chainName: string,
+  quoteTokenSymbols: string[],
+  priceCache: Map<string, { isStale: boolean } | null>,
+): void {
+  const dependencyKey = getPricingHealthDependencyKey(chainName);
+  if (quoteTokenSymbols.length === 0) {
+    setHealthDependency(dependencyKey, true);
+    return;
+  }
+
+  const missing: string[] = [];
+  const stale: string[] = [];
+
+  for (const symbol of quoteTokenSymbols) {
+    const prices = priceCache.get(symbol) ?? null;
+    if (!prices) {
+      missing.push(symbol);
+      continue;
+    }
+    if (prices.isStale) {
+      stale.push(symbol);
+    }
+  }
+
+  const healthy = missing.length === 0 && stale.length === 0;
+  const reason = healthy
+    ? undefined
+    : [
+        missing.length > 0 ? `missing prices: ${missing.join(",")}` : undefined,
+        stale.length > 0 ? `stale prices: ${stale.join(",")}` : undefined,
+      ].filter(Boolean).join("; ");
+
+  setHealthDependency(dependencyKey, healthy, reason);
+}
+
+async function refreshSubmitterHealth(
+  keeper: ChainKeeper,
+  config: AppConfig,
+): Promise<boolean> {
+  const dependencyKey = getSubmitterHealthDependencyKey(keeper);
+
+  if (config.dryRun) {
+    setHealthDependency(dependencyKey, true, "dry-run");
+    return true;
+  }
+
+  try {
+    const isHealthy = await keeper.submitter.isHealthy();
+    setHealthDependency(
+      dependencyKey,
+      isHealthy,
+      isHealthy ? undefined : "submission endpoint unavailable",
+    );
+    return isHealthy;
+  } catch (error) {
+    const formattedError = getErrorMessage(error);
+    setHealthDependency(
+      dependencyKey,
+      false,
+      formattedError,
+    );
+    logger.warn("Submitter health check failed", {
+      chain: keeper.chainConfig.chainConfig.name,
+      submitter: keeper.submitter.name,
+      error: formattedError,
+    });
+    return false;
+  }
+}
+
+async function pauseIfSubmitterBecameUnhealthy(
+  keeper: ChainKeeper,
+  config: AppConfig,
+  operation: "execution" | "reserve-auction kick",
+  pool: Address,
+): Promise<boolean> {
+  if (config.dryRun) {
+    return false;
+  }
+
+  const isHealthy = await refreshSubmitterHealth(keeper, config);
+  if (isHealthy) {
+    return false;
+  }
+
+  logger.warn("Submission endpoint became unhealthy mid-cycle, pausing further live submissions", {
+    chain: keeper.chainConfig.chainConfig.name,
+    submitter: keeper.submitter.name,
+    operation,
+    pool,
+  });
+  return true;
+}
+
+async function preflightLiveSubmitters(
+  keepers: ChainKeeper[],
+  config: AppConfig,
+): Promise<void> {
+  await Promise.all(keepers.map(async (keeper) => {
+    const isReady = keeper.submitter.preflightLiveSubmissionReadiness
+      ? await keeper.submitter.preflightLiveSubmissionReadiness()
+      : await refreshSubmitterHealth(keeper, config);
+
+    if (!isReady) {
+      setHealthDependency(
+        getSubmitterHealthDependencyKey(keeper),
+        false,
+        "startup live-submission preflight failed",
+      );
+      throw new Error(
+        `Live ${keeper.submitter.name} submission is unhealthy for ${keeper.chainConfig.chainConfig.name}. Refusing startup.`,
+      );
+    }
+
+    setHealthDependency(getSubmitterHealthDependencyKey(keeper), true);
+  }));
 }
 
 function getFlashArbRoute(
@@ -124,7 +273,12 @@ function createChainKeeper(
   const submitter: MevSubmitter =
     resolved.chainConfig.mevMethod === "flashbots"
       ? createFlashbotsSubmitter(publicClient, walletClient, config.secrets.flashbotsAuthKey)
-      : createPrivateRpcSubmitter(publicClient, walletClient, resolved.privateRpcUrl);
+      : createPrivateRpcSubmitter(
+          publicClient,
+          walletClient,
+          resolved.privateRpcUrl,
+          resolved.privateRpcTrusted,
+        );
 
   if (!config.dryRun && !submitter.supportsLiveSubmission) {
     throw new Error(
@@ -200,6 +354,148 @@ function getTransientRetryDelayMs(
   return Math.min(5_000, baseDelayMs * 2 ** Math.max(0, consecutiveTransientErrors - 1));
 }
 
+function refreshRpcHealth(
+  chainName: string,
+  consecutiveTransientErrors: number,
+  lastError?: unknown,
+): void {
+  const dependencyKey = getRpcHealthDependencyKey(chainName);
+  const RPC_HEALTH_DEGRADATION_THRESHOLD = 2;
+
+  if (consecutiveTransientErrors < RPC_HEALTH_DEGRADATION_THRESHOLD) {
+    if (consecutiveTransientErrors === 0) {
+      setHealthDependency(dependencyKey, true);
+    }
+    return;
+  }
+
+  const reason = [
+    `public RPC transient failures: ${consecutiveTransientErrors}`,
+    lastError ? `last error: ${getErrorMessage(lastError)}` : undefined,
+  ].filter(Boolean).join("; ");
+
+  setHealthDependency(dependencyKey, false, reason);
+}
+
+function getReceiptConfirmationRetryTimeoutMs(publicClient: PublicClient): number {
+  const blockTimeMs = publicClient.chain?.blockTime ?? 12_000;
+  return Math.max(5_000, Math.min(30_000, blockTimeMs * 2));
+}
+
+function toSubmissionResult(
+  pendingSubmission: PendingSubmission,
+): SubmissionResult | undefined {
+  if (!pendingSubmission.mode) {
+    return undefined;
+  }
+
+  return {
+    mode: pendingSubmission.mode,
+    txHash: pendingSubmission.txHash,
+    bundleHash: pendingSubmission.bundleHash,
+    targetBlock: pendingSubmission.targetBlock,
+    privateSubmission: pendingSubmission.privateSubmission ?? false,
+  };
+}
+
+function capturePendingSubmission(
+  chainName: string,
+  operation: "execution" | "reserve-auction kick",
+  pool: Address,
+  error: unknown,
+): PendingSubmissionState | null {
+  if (!(error instanceof PendingSubmissionError)) {
+    return null;
+  }
+
+  const { pendingSubmission } = error;
+
+  setHealthDependency(
+    getPendingSubmissionHealthDependencyKey(chainName),
+    false,
+    `awaiting resolution for ${pendingSubmission.label} submission ${pendingSubmission.txHash}`,
+  );
+
+  logger.warn("Submitted transaction outcome is unresolved, pausing further live submissions", {
+    chain: chainName,
+    operation,
+    pool,
+    txHash: pendingSubmission.txHash,
+    label: pendingSubmission.label,
+    submissionMode: pendingSubmission.mode,
+    bundleHash: pendingSubmission.bundleHash,
+    targetBlock: pendingSubmission.targetBlock?.toString(),
+    privateSubmission: pendingSubmission.privateSubmission,
+    error: error.message,
+  });
+
+  return {
+    ...pendingSubmission,
+    operation,
+    pool,
+  };
+}
+
+async function resolvePendingSubmission(
+  publicClient: PublicClient,
+  chainName: string,
+  pendingSubmission: PendingSubmissionState,
+): Promise<boolean> {
+  try {
+    const receipt = await waitForConfirmedReceipt(
+      publicClient,
+      pendingSubmission.txHash,
+      pendingSubmission.label,
+      {
+        timeoutMs: getReceiptConfirmationRetryTimeoutMs(publicClient),
+        submission: toSubmissionResult(pendingSubmission),
+      },
+    );
+
+    setHealthDependency(getPendingSubmissionHealthDependencyKey(chainName), true);
+    logger.info("Previously submitted transaction outcome resolved", {
+      chain: chainName,
+      operation: pendingSubmission.operation,
+      pool: pendingSubmission.pool,
+      txHash: pendingSubmission.txHash,
+      label: pendingSubmission.label,
+      submissionMode: pendingSubmission.mode,
+      bundleHash: pendingSubmission.bundleHash,
+      targetBlock: pendingSubmission.targetBlock?.toString(),
+      status: receipt.status,
+      blockNumber: receipt.blockNumber.toString(),
+    });
+    return true;
+  } catch (error) {
+    if (!(error instanceof PendingSubmissionError)) {
+      throw error;
+    }
+
+    const refreshedPendingSubmission = {
+      ...pendingSubmission,
+      ...error.pendingSubmission,
+    };
+
+    setHealthDependency(
+      getPendingSubmissionHealthDependencyKey(chainName),
+      false,
+      `awaiting resolution for ${refreshedPendingSubmission.label} submission ${refreshedPendingSubmission.txHash}`,
+    );
+    logger.warn("Waiting for previously submitted transaction resolution before allowing new live submissions", {
+      chain: chainName,
+      operation: refreshedPendingSubmission.operation,
+      pool: refreshedPendingSubmission.pool,
+      txHash: refreshedPendingSubmission.txHash,
+      label: refreshedPendingSubmission.label,
+      submissionMode: refreshedPendingSubmission.mode,
+      bundleHash: refreshedPendingSubmission.bundleHash,
+      targetBlock: refreshedPendingSubmission.targetBlock?.toString(),
+      error: error.message,
+    });
+    return false;
+  }
+}
+
 async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<void> {
   const { chainConfig, publicClient, strategy } = keeper;
   const chainName = chainConfig.chainConfig.name;
@@ -228,9 +524,36 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
   const KICK_RESERVE_AUCTION_GAS_UNITS = 120_000n;
   const MAX_CONSECUTIVE_TRANSIENT_ERRORS = 5;
   let consecutiveTransientErrors = 0;
+  let pendingSubmission: PendingSubmissionState | null = null;
 
   while (!shutdownRequested) {
     try {
+      if (pendingSubmission) {
+        const resolved = await resolvePendingSubmission(
+          publicClient,
+          chainName,
+          pendingSubmission,
+        );
+        if (!resolved) {
+          await sleep(config.polling.idleIntervalMs);
+          continue;
+        }
+        pendingSubmission = null;
+      } else {
+        setHealthDependency(getPendingSubmissionHealthDependencyKey(chainName), true);
+      }
+
+      const submitterHealthy = await refreshSubmitterHealth(keeper, config);
+      if (!submitterHealthy) {
+        logger.warn("Submission endpoint unhealthy, pausing chain loop", {
+          chain: chainName,
+          submitter: keeper.submitter.name,
+          dryRun: config.dryRun,
+        });
+        await sleep(config.polling.idleIntervalMs);
+        continue;
+      }
+
       // Periodically re-discover pools, and always discover before the first cycle.
       if (keeper.pools.length === 0 || rediscoveryCounter >= REDISCOVERY_INTERVAL) {
         rediscoveryCounter = 0;
@@ -267,11 +590,38 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
       const quoteTokenSymbols = [...new Set(
         [...activeAuctions, ...kickable].map((poolState) => poolState.quoteTokenSymbol),
       )];
-      const priceCache = quoteTokenSymbols.length > 0
-        ? await oracle.getPricesForQuoteTokens(quoteTokenSymbols)
-        : new Map<string, Awaited<ReturnType<typeof oracle.getPrices>>>();
-      const gasPrice = activeAuctions.length > 0 || kickable.length > 0
-        ? await publicClient.getGasPrice()
+      const priceCache = await (async () => {
+        try {
+          return quoteTokenSymbols.length > 0
+            ? await oracle.getPricesForQuoteTokens(quoteTokenSymbols)
+            : new Map<string, Awaited<ReturnType<typeof oracle.getPrices>>>();
+        } catch (error) {
+          setHealthDependency(
+            getPricingHealthDependencyKey(chainName),
+            false,
+            getErrorMessage(error),
+          );
+          throw error;
+        }
+      })();
+      refreshPricingHealth(chainName, quoteTokenSymbols, priceCache);
+      const gasPriceSnapshot = activeAuctions.length > 0 || kickable.length > 0
+        ? await Promise.all([
+            publicClient.getGasPrice(),
+            publicClient.getBlock({ blockTag: "latest" }),
+          ])
+        : null;
+      const feeCapOverrides = gasPriceSnapshot
+        ? getNextBlockSafeFeeCapOverrides(
+            gasPriceSnapshot[0],
+            gasPriceSnapshot[1].baseFeePerGas ?? undefined,
+          )
+        : undefined;
+      const gasPrice = gasPriceSnapshot
+        ? getNextBlockSafeGasPriceWei(
+            gasPriceSnapshot[0],
+            gasPriceSnapshot[1].baseFeePerGas ?? undefined,
+          )
         : null;
       const kickGasCheck = gasPrice == null
         ? null
@@ -284,8 +634,11 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
 
       // 4. Evaluate and execute on each active auction
       let anyNearProfitable = false;
+      let pauseFurtherLiveSubmissions = false;
 
       for (const poolState of activeAuctions) {
+        if (shutdownRequested || pauseFurtherLiveSubmissions) break;
+
         const priceInfo = auctionPrices.get(poolState.pool);
         if (!priceInfo) continue;
 
@@ -305,6 +658,8 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
           auctionPrice: priceInfo.auctionPrice,
           prices,
           chainName,
+          gasPriceWei: gasPrice!,
+          feeCapOverrides,
         };
 
         const profit = await strategy.estimateProfit(ctx);
@@ -375,6 +730,18 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
             receiptBlockNumber: result.realized?.blockNumber.toString(),
           });
         } catch (error) {
+          const pending = capturePendingSubmission(
+            chainName,
+            "execution",
+            poolState.pool,
+            error,
+          );
+          if (pending) {
+            pendingSubmission = pending;
+            pauseFurtherLiveSubmissions = true;
+            continue;
+          }
+
           logger.error("Execution failed", {
             chain: chainName,
             pool: poolState.pool,
@@ -383,12 +750,19 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
             priceSource: ctx.prices.source,
             error: error instanceof Error ? error.message : String(error),
           });
+
+          pauseFurtherLiveSubmissions = await pauseIfSubmitterBecameUnhealthy(
+            keeper,
+            config,
+            "execution",
+            poolState.pool,
+          );
         }
       }
 
       // 5. Kick reserve auctions if eligible
       for (const poolState of kickable) {
-        if (shutdownRequested) break;
+        if (shutdownRequested || pauseFurtherLiveSubmissions) break;
 
         const prices = priceCache.get(poolState.quoteTokenSymbol) ?? null;
         if (!prices) continue;
@@ -406,6 +780,8 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
           poolState,
           prices,
           chainName,
+          gasPriceWei: gasPrice!,
+          feeCapOverrides,
         };
         const additionalKickExecutionGasUnits =
           await strategy.estimateAdditionalKickExecutionGasUnits?.(kickCtx) ?? 0n;
@@ -469,6 +845,8 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
               keeper.submitter,
               keeper.walletClient.account!.address,
               poolState.pool,
+              gasPrice ?? undefined,
+              feeCapOverrides,
             );
 
             logger.info("Reserve auction kicked", {
@@ -481,20 +859,42 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
               receiptBlockNumber: submission.receiptBlockNumber.toString(),
             });
           } catch (error) {
+            const pending = capturePendingSubmission(
+              chainName,
+              "reserve-auction kick",
+              poolState.pool,
+              error,
+            );
+            if (pending) {
+              pendingSubmission = pending;
+              pauseFurtherLiveSubmissions = true;
+              continue;
+            }
+
             logger.error("Failed to kick reserve auction", {
               chain: chainName,
               pool: poolState.pool,
               error: error instanceof Error ? error.message : String(error),
             });
+
+            pauseFurtherLiveSubmissions = await pauseIfSubmitterBecameUnhealthy(
+              keeper,
+              config,
+              "reserve-auction kick",
+              poolState.pool,
+            );
           }
         }
       }
 
       consecutiveTransientErrors = 0;
+      refreshRpcHealth(chainName, consecutiveTransientErrors);
       rediscoveryCounter++;
 
       // 6. Adaptive sleep
-      const sleepMs = anyNearProfitable
+      const sleepMs = pauseFurtherLiveSubmissions
+        ? config.polling.idleIntervalMs
+        : anyNearProfitable
         ? config.polling.activeIntervalMs
         : config.polling.idleIntervalMs;
 
@@ -506,6 +906,7 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
 
       consecutiveTransientErrors++;
       const retryDelayMs = getTransientRetryDelayMs(config, consecutiveTransientErrors);
+      refreshRpcHealth(chainName, consecutiveTransientErrors, error);
       logger.warn("Transient chain loop error, retrying", {
         chain: chainName,
         consecutiveTransientErrors,
@@ -554,6 +955,8 @@ export function sleep(
 
 export async function startKeeper(config: AppConfig): Promise<void> {
   shutdownRequested = false;
+  setHealthy(true);
+  clearAllHealthDependencies();
   logger.info("Starting Ajna Reserve Auction Keeper", {
     strategy: config.strategy,
     chains: config.chains.map((c) => c.chainConfig.name),
@@ -573,6 +976,7 @@ export async function startKeeper(config: AppConfig): Promise<void> {
   );
 
   const keepers = config.chains.map((chain) => createChainKeeper(chain, config));
+  await preflightLiveSubmitters(keepers, config);
 
   // Run all chain loops concurrently, but fail the keeper if any loop crashes.
   const loops = keepers.map((keeper) =>

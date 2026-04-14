@@ -1,10 +1,17 @@
 import { parseEther } from "viem";
 
 const WAD = parseEther("1");
+const RESERVE_AUCTION_INITIAL_PRICE_MULTIPLIER = 1_000_000_000n * WAD;
+const RESERVE_AUCTION_DECAY_HOURS = 72n;
 
 export function ceilWadMul(left: bigint, right: bigint): bigint {
   if (left === 0n || right === 0n) return 0n;
   return (left * right + WAD - 1n) / WAD;
+}
+
+export function wadDiv(left: bigint, right: bigint): bigint {
+  if (left === 0n || right === 0n) return 0n;
+  return left * WAD / right;
 }
 
 export function roundDownToTokenScale(amount: bigint, scale: bigint): bigint {
@@ -42,4 +49,19 @@ export function calculateReserveTakeAjnaCost(
   auctionPrice: bigint,
 ): bigint {
   return ceilWadMul(quoteAmount, auctionPrice);
+}
+
+export function calculateReserveAuctionInitialPrice(
+  claimableReserves: bigint,
+): bigint {
+  if (claimableReserves <= 0n) return 0n;
+  return wadDiv(RESERVE_AUCTION_INITIAL_PRICE_MULTIPLIER, claimableReserves);
+}
+
+export function calculateReserveAuctionFinalPrice(
+  claimableReserves: bigint,
+): bigint {
+  if (claimableReserves <= 0n) return 0n;
+  return calculateReserveAuctionInitialPrice(claimableReserves) /
+    (1n << RESERVE_AUCTION_DECAY_HOURS);
 }

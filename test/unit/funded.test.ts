@@ -183,7 +183,9 @@ describe("funded strategy", () => {
       },
     );
 
-    const result = await strategy.execute(makeContext());
+    const result = await strategy.execute(makeContext({
+      gasPriceWei: 3_000_000_000n,
+    }));
 
     expect(publicClient.simulateContract).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -391,7 +393,9 @@ describe("funded strategy", () => {
       },
     );
 
-    const result = await strategy.execute(makeContext());
+    const result = await strategy.execute(makeContext({
+      gasPriceWei: 3_000_000_000n,
+    }));
 
     expect(submitter.submit).toHaveBeenNthCalledWith(
       1,
@@ -400,10 +404,12 @@ describe("funded strategy", () => {
         functionName: "approve",
         args: [POOL_ADDRESS, parseEther("100")],
         account: WALLET_ADDRESS,
+        gasPriceWei: 3_000_000_000n,
       }),
     );
     expect(publicClient.waitForTransactionReceipt).toHaveBeenCalledWith({
       hash: "0x" + "aa".repeat(32),
+      timeout: 60_000,
     });
     expect(submitter.submit).toHaveBeenNthCalledWith(
       2,
@@ -412,6 +418,7 @@ describe("funded strategy", () => {
         functionName: "takeReserves",
         args: [parseEther("50")],
         account: WALLET_ADDRESS,
+        gasPriceWei: 3_000_000_000n,
       }),
     );
     expect(result.txHash).toBe("0x" + "bb".repeat(32));

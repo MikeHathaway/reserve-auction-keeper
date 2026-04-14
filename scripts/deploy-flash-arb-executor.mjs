@@ -1,5 +1,8 @@
 import "dotenv/config";
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { createEphemeralFoundryRpcConfig } from "./foundry-rpc-config.mjs";
+import { createRestrictedChildEnv } from "./child-process-env.mjs";
 
 const STANDARD_UNISWAP_V3_POOL_INIT_CODE_HASH =
   "0xe34f199b19b2b4f47f68442619d555527d244f78a3297ea89325f843f87b8b54";
@@ -83,6 +86,75 @@ const CHAIN_PRESETS = {
   },
 };
 
+const DISALLOWED_FORWARD_FLAGS = new Map([
+  ["--private-key", "Use --account or --keystore with --password-file instead."],
+  ["--mnemonic", "Use --account or --keystore with --password-file instead."],
+  ["--mnemonic-passphrase", "Use --account or --keystore with --password-file instead."],
+  ["--password", "Use --password-file instead of passing a password on the command line."],
+  ["--etherscan-api-key", "Set the verifier API key in the environment instead of passing it on the command line."],
+  ["--verifier-api-key", "Set the verifier API key in the environment instead of passing it on the command line."],
+  ["--rpc-url", "Use DEPLOY_RPC_URL or DEPLOY_CHAIN instead of forwarding --rpc-url."],
+  ["--fork-url", "Use DEPLOY_RPC_URL or DEPLOY_CHAIN instead of forwarding --fork-url."],
+  ["-f", "Use DEPLOY_RPC_URL or DEPLOY_CHAIN instead of forwarding -f/--fork-url."],
+]);
+
+function parseCliFlag(arg) {
+  if (!arg.startsWith("-")) return null;
+  const equalsIndex = arg.indexOf("=");
+  return equalsIndex === -1 ? arg : arg.slice(0, equalsIndex);
+}
+
+function shouldRedactFlagValue(flag) {
+  if (!flag) return false;
+  return /(?:key|secret|password|url)/i.test(flag) || flag === "-f";
+}
+
+function sanitizeArgsForLogs(args) {
+  const sanitized = [];
+  let redactNext = false;
+
+  for (const arg of args) {
+    if (redactNext) {
+      sanitized.push("[redacted]");
+      redactNext = false;
+      continue;
+    }
+
+    const flag = parseCliFlag(arg);
+    if (flag && shouldRedactFlagValue(flag)) {
+      if (arg.includes("=")) {
+        sanitized.push(`${flag}=[redacted]`);
+      } else {
+        sanitized.push(flag);
+        redactNext = true;
+      }
+      continue;
+    }
+
+    sanitized.push(arg);
+  }
+
+  return sanitized;
+}
+
+function getVerifierEnvKeys() {
+  return Object.keys(process.env).filter((key) =>
+    /(?:etherscan|blockscout|verifier|sourcify)/i.test(key)
+  );
+}
+
+function assertNoUnsafeForwardedArgs(args) {
+  for (const arg of args) {
+    const flag = parseCliFlag(arg);
+    if (!flag) continue;
+
+    const guidance = DISALLOWED_FORWARD_FLAGS.get(flag);
+    if (guidance) {
+      throw new Error(`Refusing to forward ${flag}. ${guidance}`);
+    }
+  }
+}
+
 function resolveChain() {
   const raw = process.env.DEPLOY_CHAIN?.trim().toLowerCase();
   if (!raw) return null;
@@ -104,10 +176,13 @@ function resolveRpcUrl(chainName, preset) {
   }
 
   const provider = process.env.RPC_PROVIDER?.trim().toLowerCase();
-  const apiKey = process.env.RPC_API_KEY?.trim();
+  const apiKey = process.env.RPC_API_KEY?.trim() ||
+    (process.env.RPC_API_KEY_FILE
+      ? readFileSync(process.env.RPC_API_KEY_FILE, "utf-8").trim()
+      : "");
   if (!provider || !apiKey || !preset) {
     throw new Error(
-      "DEPLOY_RPC_URL or DEPLOY_CHAIN plus RPC_PROVIDER/RPC_API_KEY is required for deployment.",
+      "DEPLOY_RPC_URL or DEPLOY_CHAIN plus RPC_PROVIDER/RPC_API_KEY or RPC_API_KEY_FILE is required for deployment.",
     );
   }
 
@@ -140,6 +215,8 @@ function requireHex(name, value, expectedLength) {
 
 const chainName = resolveChain();
 const preset = chainName ? CHAIN_PRESETS[chainName] : null;
+const forwardedArgs = process.argv.slice(2);
+assertNoUnsafeForwardedArgs(forwardedArgs);
 const executorKind = (process.env.FLASH_ARB_EXECUTOR_KIND?.trim().toLowerCase() || "v3v3");
 if (!SUPPORTED_EXECUTOR_KINDS.includes(executorKind)) {
   throw new Error(
@@ -170,16 +247,20 @@ const scriptTarget = executorKind === "v2v3"
 const forgeArgs = [
   "script",
   scriptTarget,
+  "--config-path",
+  "",
   "--rpc-url",
-  rpcUrl,
-  ...process.argv.slice(2),
+  "deploy",
+  ...forwardedArgs,
 ];
 
-const env = {
-  ...process.env,
-  FLASH_ARB_EXECUTOR_AJNA_TOKEN: ajnaToken,
-  FLASH_ARB_EXECUTOR_SWAP_ROUTER: swapRouter,
-};
+const env = createRestrictedChildEnv(
+  {
+    FLASH_ARB_EXECUTOR_AJNA_TOKEN: ajnaToken,
+    FLASH_ARB_EXECUTOR_SWAP_ROUTER: swapRouter,
+  },
+  getVerifierEnvKeys(),
+);
 
 let deploymentDetails = {
   chain: chainName ?? "custom",
@@ -190,8 +271,10 @@ let deploymentDetails = {
     ? "DEPLOY_RPC_URL"
     : preset?.explicitRpcEnv && process.env[preset.explicitRpcEnv]
     ? preset.explicitRpcEnv
+    : process.env.RPC_API_KEY_FILE
+    ? "RPC_API_KEY_FILE"
     : "RPC_PROVIDER/RPC_API_KEY",
-  forgeArgs,
+  forgeArgs: sanitizeArgsForLogs(forgeArgs),
 };
 
 if (executorKind === "v2v3") {
@@ -231,9 +314,18 @@ console.error("Preparing FlashArbExecutor deployment", {
   ...deploymentDetails,
 });
 
-const result = spawnSync("forge", forgeArgs, {
-  stdio: "inherit",
-  env,
-});
+const { configPath, cleanup } = createEphemeralFoundryRpcConfig("deploy", rpcUrl);
+forgeArgs[3] = configPath;
 
-process.exit(result.status ?? 1);
+let exitCode = 1;
+try {
+  const result = spawnSync("forge", forgeArgs, {
+    stdio: "inherit",
+    env,
+  });
+  exitCode = result.status ?? 1;
+} finally {
+  cleanup();
+}
+
+process.exit(exitCode);

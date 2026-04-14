@@ -1,11 +1,25 @@
 import "dotenv/config";
 import { loadConfig } from "./config.js";
 import { startKeeper, requestShutdown } from "./keeper.js";
-import { startHealthCheck, stopHealthCheck } from "./utils/health.js";
+import { setHealthy, startHealthCheck, stopHealthCheck } from "./utils/health.js";
 import { logger, setAlertWebhookUrl, setLogLevel } from "./utils/logger.js";
 
 const CONFIG_PATH = process.env.CONFIG_PATH || "config.json";
 const LOG_LEVEL = process.env.LOG_LEVEL || "info";
+
+function resolveHealthCheckPort(configPort: number): number {
+  const raw = process.env.HEALTH_CHECK_PORT;
+  if (!raw) {
+    return configPort;
+  }
+
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`Invalid HEALTH_CHECK_PORT: ${raw}`);
+  }
+
+  return parsed;
+}
 
 async function main() {
   setLogLevel(LOG_LEVEL as "debug" | "info" | "warn" | "error");
@@ -34,10 +48,31 @@ async function main() {
     dryRun: config.dryRun,
   });
 
+  const healthCheckPort = (() => {
+    try {
+      return resolveHealthCheckPort(config.healthCheckPort);
+    } catch (error) {
+      logger.fatal("Invalid health check port configuration", {
+        configHealthCheckPort: config.healthCheckPort,
+        envHealthCheckPort: process.env.HEALTH_CHECK_PORT,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      process.exit(1);
+    }
+  })();
+
   setAlertWebhookUrl(config.alertWebhookUrl);
 
   // Start health check server
-  startHealthCheck(config.healthCheckPort);
+  try {
+    await startHealthCheck(healthCheckPort);
+  } catch (error) {
+    logger.fatal("Failed to start health check server", {
+      port: healthCheckPort,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    process.exit(1);
+  }
 
   let forcedShutdownTimer: ReturnType<typeof setTimeout> | undefined;
   let shutdownInitiated = false;
@@ -73,6 +108,7 @@ async function main() {
   if (forcedShutdownTimer) {
     clearTimeout(forcedShutdownTimer);
   }
+  setHealthy(false);
   await stopHealthCheck();
 
   if (exitCode !== 0) {

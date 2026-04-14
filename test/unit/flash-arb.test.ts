@@ -29,6 +29,11 @@ const V3_PATH = encodeUniswapV3Path(
   DISJOINT_SWAP_FEE,
   BASE_CONFIG.ajnaToken,
 );
+const ALT_V3_PATH = encodeUniswapV3Path(
+  QUOTE_TOKEN_ADDRESS,
+  700,
+  BASE_CONFIG.ajnaToken,
+);
 const REUSED_V3_PATH = encodeUniswapV3Path(
   QUOTE_TOKEN_ADDRESS,
   FLASH_POOL_FEE,
@@ -58,6 +63,7 @@ function makeContext(overrides: Partial<AuctionContext> = {}): AuctionContext {
       isStale: false,
     },
     chainName: "base",
+    gasPriceWei: undefined,
     ...overrides,
   };
 }
@@ -108,7 +114,11 @@ function makeStrategy({
   dryRun = true,
   route = makeRoute(),
   v3QuotedAmountOut = parseEther("130"),
+  altV3QuotedAmountOut = parseEther("130"),
   reusedPathAmountOut = parseEther("130"),
+  v3GasEstimate = 100_000n,
+  altV3GasEstimate = 100_000n,
+  reusedPathGasEstimate = 100_000n,
   v3FlashPoolLiquidity = 1n,
   v3FlashPoolAjnaBalance = parseEther("500"),
   v2FlashPairReserves = [25_000_000n, parseEther("500")] as const,
@@ -149,8 +159,13 @@ function makeStrategy({
 
     if (address === QUOTER_ADDRESS && functionName === "quoteExactInput") {
       const path = args?.[0] as Hex;
-      const amountOut = path === REUSED_V3_PATH ? reusedPathAmountOut : v3QuotedAmountOut;
-      return [amountOut, [], [], 100000n];
+      if (path === REUSED_V3_PATH) {
+        return [reusedPathAmountOut, [], [], reusedPathGasEstimate];
+      }
+      if (path === ALT_V3_PATH) {
+        return [altV3QuotedAmountOut, [], [], altV3GasEstimate];
+      }
+      return [v3QuotedAmountOut, [], [], v3GasEstimate];
     }
 
     if (
@@ -277,7 +292,7 @@ describe("flash-arb strategy", () => {
 
   it("simulates v3v3 executor execution during dry runs", async () => {
     const { strategy, publicClient } = makeStrategy();
-    const ctx = makeContext();
+    const ctx = makeContext({ gasPriceWei: 4_000_000_000n });
 
     const result = await strategy.execute(ctx);
 
@@ -346,7 +361,7 @@ describe("flash-arb strategy", () => {
       }
       throw new Error(`Unexpected readContract call ${address}.${functionName}`);
     });
-    const ctx = makeContext();
+    const ctx = makeContext({ gasPriceWei: 4_000_000_000n });
 
     const result = await strategy.execute(ctx);
 
@@ -355,6 +370,7 @@ describe("flash-arb strategy", () => {
         to: EXECUTOR_V3V3,
         functionName: "executeFlashArb",
         account: WALLET_ADDRESS,
+        gasPriceWei: 4_000_000_000n,
       }),
     );
     expect(result.submissionMode).toBe("private-rpc");
@@ -437,6 +453,125 @@ describe("flash-arb strategy", () => {
     );
   });
 
+  it("prefers the higher net-profit route when a slightly richer quote also costs materially more gas", async () => {
+    const route = makeRoute({
+      swapRoutes: {
+        USDC: [
+          {
+            protocol: "uniswap-v3",
+            path: V3_PATH,
+          },
+          {
+            protocol: "uniswap-v3",
+            path: ALT_V3_PATH,
+          },
+        ],
+      },
+    });
+    const { strategy, publicClient } = makeStrategy({
+      route,
+      v3QuotedAmountOut: parseEther("130"),
+      altV3QuotedAmountOut: parseEther("131"),
+      v3GasEstimate: 100_000n,
+      altV3GasEstimate: 900_000n,
+    });
+    const ctx = makeContext({ gasPriceWei: 5_000_000_000n });
+
+    await expect(strategy.canExecute(ctx)).resolves.toBe(true);
+    await expect(strategy.estimateAdditionalExecutionGasUnits?.(ctx)).resolves.toBe(100_000n);
+    await strategy.execute(ctx);
+
+    expect(publicClient.simulateContract).toHaveBeenCalledWith(
+      expect.objectContaining({
+        address: EXECUTOR_V3V3,
+        args: [
+          expect.objectContaining({
+            swapPath: V3_PATH,
+          }),
+        ],
+      }),
+    );
+  });
+
+  it("re-evaluates a fresh context instead of reusing the previous loop candidate", async () => {
+    let quotedAmountOut = parseEther("130");
+    const readContract = vi.fn(async (
+      {
+        address,
+        functionName,
+        args,
+      }: { address: Address; functionName: string; args?: readonly unknown[] },
+    ) => {
+      if (address === V3_FLASH_POOL_ADDRESS && functionName === "token0") return QUOTE_TOKEN_ADDRESS;
+      if (address === V3_FLASH_POOL_ADDRESS && functionName === "token1") return BASE_CONFIG.ajnaToken;
+      if (address === V3_FLASH_POOL_ADDRESS && functionName === "fee") return BigInt(FLASH_POOL_FEE);
+      if (address === V3_FLASH_POOL_ADDRESS && functionName === "liquidity") return 1n;
+      if (address === QUOTER_ADDRESS && functionName === "quoteExactInput") {
+        return [quotedAmountOut, [], [], 100000n];
+      }
+      if (
+        address === BASE_CONFIG.ajnaToken &&
+        functionName === "balanceOf" &&
+        args?.[0] === V3_FLASH_POOL_ADDRESS
+      ) {
+        return parseEther("500");
+      }
+      if (
+        address === BASE_CONFIG.ajnaToken &&
+        functionName === "balanceOf" &&
+        args?.[0] === WALLET_ADDRESS
+      ) {
+        return parseEther("5");
+      }
+      if (
+        address === QUOTE_TOKEN_ADDRESS &&
+        functionName === "balanceOf" &&
+        args?.[0] === WALLET_ADDRESS
+      ) {
+        return 0n;
+      }
+      throw new Error(`Unexpected readContract call ${address}.${functionName}`);
+    });
+    const publicClient = {
+      chain: BASE_CONFIG.chain,
+      readContract,
+      getBalance: vi.fn().mockResolvedValue(parseEther("1")),
+      simulateContract: vi.fn().mockResolvedValue({}),
+      waitForTransactionReceipt: vi.fn().mockResolvedValue({
+        status: "success",
+        blockNumber: 55n,
+        gasUsed: 40_000n,
+        effectiveGasPrice: 1_250_000_000n,
+      }),
+    };
+    const strategy = createFlashArbStrategy(
+      publicClient as never,
+      { account: { address: WALLET_ADDRESS } } as never,
+      makeSubmitter(),
+      {
+        maxSlippagePercent: 1,
+        minLiquidityUsd: 10,
+        minProfitUsd: 0.1,
+        ajnaToken: BASE_CONFIG.ajnaToken,
+        nativeTokenPriceUsd: BASE_CONFIG.nativeTokenPriceUsd,
+        dryRun: true,
+        route: makeRoute() as never,
+      },
+    );
+
+    const firstCtx = makeContext();
+    await expect(strategy.canExecute(firstCtx)).resolves.toBe(true);
+
+    quotedAmountOut = parseEther("50");
+    const secondCtx = makeContext();
+    await expect(strategy.canExecute(secondCtx)).resolves.toBe(false);
+
+    const quoterCalls = readContract.mock.calls.filter(([call]) =>
+      call.address === QUOTER_ADDRESS && call.functionName === "quoteExactInput"
+    );
+    expect(quoterCalls).toHaveLength(2);
+  });
+
   it("estimateKickProfit returns the best mixed-family profit estimate when the route remains viable", async () => {
     const route = makeRoute({
       sources: {
@@ -471,6 +606,28 @@ describe("flash-arb strategy", () => {
       prices: makeContext().prices,
       chainName: "base",
     })).resolves.toBeGreaterThan(10);
+  });
+
+  it("estimateKickProfit derives a conservative future candidate for kickable auctions with no live auction price yet", async () => {
+    const { strategy } = makeStrategy({ v3QuotedAmountOut: parseEther("260") });
+    const kickablePoolState = {
+      ...makeContext().poolState,
+      claimableReservesRemaining: 0n,
+      auctionPrice: 0n,
+      timeRemaining: 0n,
+      hasActiveAuction: false,
+      isKickable: true,
+    };
+
+    const kickCtx = {
+      poolState: kickablePoolState,
+      prices: makeContext().prices,
+      chainName: "base",
+      gasPriceWei: 5_000_000_000n,
+    };
+
+    await expect(strategy.estimateKickProfit(kickCtx)).resolves.toBeGreaterThanOrEqual(0.1);
+    await expect(strategy.estimateAdditionalKickExecutionGasUnits?.(kickCtx)).resolves.toBe(100_000n);
   });
 
   it("estimateKickProfit returns zero when no minimum net profit is configured", async () => {

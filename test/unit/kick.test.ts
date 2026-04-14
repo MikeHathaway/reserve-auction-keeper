@@ -41,6 +41,7 @@ describe("kick reserve auction", () => {
       submitter,
       WALLET,
       POOL,
+      2_000_000_000n,
     );
 
     expect(submitter.submit).toHaveBeenCalledWith(
@@ -49,10 +50,12 @@ describe("kick reserve auction", () => {
         functionName: "kickReserveAuction",
         args: [],
         account: WALLET,
+        gasPriceWei: 2_000_000_000n,
       }),
     );
     expect(publicClient.waitForTransactionReceipt).toHaveBeenCalledWith({
       hash: `0x${"ab".repeat(32)}`,
+      timeout: 120_000,
     });
     expect(result).toMatchObject({
       mode: "private-rpc",

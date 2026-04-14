@@ -2,18 +2,23 @@ import type { Address, Hex } from "viem";
 import type { PoolReserveState } from "../auction/discovery.js";
 import type { PriceData } from "../pricing/oracle.js";
 import type { RealizedExecutionSettlement } from "../execution/settlement.js";
+import type { FeeCapOverrides } from "../execution/gas.js";
 
 export interface AuctionContext {
   poolState: PoolReserveState;
   auctionPrice: bigint;
   prices: PriceData;
   chainName: string;
+  gasPriceWei?: bigint;
+  feeCapOverrides?: FeeCapOverrides;
 }
 
 export interface KickContext {
   poolState: PoolReserveState;
   prices: PriceData;
   chainName: string;
+  gasPriceWei?: bigint;
+  feeCapOverrides?: FeeCapOverrides;
 }
 
 export interface TxResult {

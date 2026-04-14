@@ -12,16 +12,28 @@ import type { MevSubmitter, SubmitRequest, SubmissionResult } from "./mev-submit
 import { logger } from "../utils/logger.js";
 import { getErrorMessage, isTransientRpcError, retryAsync } from "../utils/retry.js";
 import { generateEphemeralPrivateKey } from "../utils/secrets.js";
+import { fetchWithTimeout } from "../utils/http.js";
+import { getEip1559FeeCapOverrides } from "./gas.js";
+import { PendingSubmissionError, createPendingSubmissionError } from "./receipt.js";
 
 const FLASHBOTS_RELAY_URL = "https://relay.flashbots.net";
 const MAX_BLOCK_RETRIES = 3;
 const DEFAULT_POLL_INTERVAL_MS = 1_000;
+const DEFAULT_RELAY_HTTP_TIMEOUT_MS = 10_000;
+const DEFAULT_RECEIPT_VISIBILITY_TIMEOUT_MS = 5_000;
+const DEFAULT_WRITE_PATH_HEALTHY_CACHE_MS = 60_000;
+const DEFAULT_WRITE_PATH_FAILURE_RETRY_MS = 5_000;
 
 interface FlashbotsOptions {
   relayUrl?: string;
   maxBlockRetries?: number;
   pollIntervalMs?: number;
   sleep?: (ms: number) => Promise<void>;
+  relayTimeoutMs?: number;
+  receiptVisibilityTimeoutMs?: number;
+  writePathRevalidationIntervalMs?: number;
+  writePathFailureRetryMs?: number;
+  now?: () => number;
 }
 
 interface FlashbotsRpcSuccess<T> {
@@ -42,6 +54,20 @@ function isReceiptNotFoundError(error: unknown): boolean {
   return getErrorMessage(error).toLowerCase().includes("receipt");
 }
 
+function isExpectedSendBundleProbeError(error: unknown): boolean {
+  const message = getErrorMessage(error).toLowerCase();
+  return [
+    "decode",
+    "deserial",
+    "invalid transaction",
+    "rlp",
+    "hex string",
+    "unable to parse",
+    "unable to decode",
+    "malformed",
+  ].some((fragment) => message.includes(fragment));
+}
+
 /**
  * Single-transaction Flashbots bundle submitter.
  * This uses a local account to build and sign a raw EIP-1559 transaction,
@@ -58,7 +84,17 @@ export function createFlashbotsSubmitter(
   const maxBlockRetries = options.maxBlockRetries || MAX_BLOCK_RETRIES;
   const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   const sleep = options.sleep || defaultSleep;
+  const relayTimeoutMs = options.relayTimeoutMs ?? DEFAULT_RELAY_HTTP_TIMEOUT_MS;
+  const receiptVisibilityTimeoutMs =
+    options.receiptVisibilityTimeoutMs ?? DEFAULT_RECEIPT_VISIBILITY_TIMEOUT_MS;
+  const writePathHealthyCacheMs =
+    options.writePathRevalidationIntervalMs ?? DEFAULT_WRITE_PATH_HEALTHY_CACHE_MS;
+  const writePathFailureRetryMs =
+    options.writePathFailureRetryMs ?? DEFAULT_WRITE_PATH_FAILURE_RETRY_MS;
+  const now = options.now || Date.now;
   const flashbotsAuthKey = authKey ?? generateEphemeralPrivateKey();
+  let lastWritePathProbeAt: number | null = null;
+  let lastWritePathHealthy = false;
 
   if (!authKey) {
     logger.warn(
@@ -89,13 +125,15 @@ export function createFlashbotsSubmitter(
 
     const response = await retryAsync(
       () =>
-        fetch(relayUrl, {
+        fetchWithTimeout(relayUrl, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             "X-Flashbots-Signature": signature,
           },
           body,
+          timeoutMs: relayTimeoutMs,
+          label: `flashbots.${method}`,
         }),
       {
         label: `flashbots.${method}.http`,
@@ -161,6 +199,53 @@ export function createFlashbotsSubmitter(
     return result.bundleHash;
   }
 
+  async function probeSendBundlePath(targetBlock: bigint): Promise<void> {
+    try {
+      await relayRpc<{ bundleHash?: string }>(
+        "eth_sendBundle",
+        [
+          {
+            txs: ["0x00"],
+            blockNumber: numberToHex(targetBlock),
+          },
+        ],
+      );
+    } catch (error) {
+      if (isExpectedSendBundleProbeError(error)) {
+        return;
+      }
+      throw error;
+    }
+  }
+
+  function recordWritePathHealth(healthy: boolean) {
+    lastWritePathProbeAt = now();
+    lastWritePathHealthy = healthy;
+  }
+
+  function hasRecentWritePathFailure(): boolean {
+    if (lastWritePathProbeAt == null || lastWritePathHealthy) {
+      return false;
+    }
+    return now() - lastWritePathProbeAt < writePathFailureRetryMs;
+  }
+
+  async function simulateExecutionPath(targetBlock: bigint): Promise<void> {
+    const { serializedTransaction } = await buildSignedHealthCheckTransaction();
+    await simulateBundle(serializedTransaction, targetBlock);
+  }
+
+  async function revalidateWritePath(targetBlock: bigint): Promise<boolean> {
+    try {
+      await probeSendBundlePath(targetBlock);
+      recordWritePathHealth(true);
+      return true;
+    } catch {
+      recordWritePathHealth(false);
+      return false;
+    }
+  }
+
   async function waitForTargetBlock(targetBlock: bigint): Promise<void> {
     while (true) {
       const currentBlock = await publicClient.getBlockNumber();
@@ -175,16 +260,31 @@ export function createFlashbotsSubmitter(
   ): Promise<boolean> {
     await waitForTargetBlock(targetBlock);
 
-    try {
-      const receipt = await publicClient.getTransactionReceipt({ hash: txHash });
-      return receipt.blockNumber === targetBlock;
-    } catch (error) {
-      if (isReceiptNotFoundError(error)) return false;
-      throw error;
+    const deadline = now() + receiptVisibilityTimeoutMs;
+
+    while (true) {
+      try {
+        const receipt = await publicClient.getTransactionReceipt({ hash: txHash });
+        return receipt.blockNumber === targetBlock;
+      } catch (error) {
+        if (!isReceiptNotFoundError(error)) {
+          throw error;
+        }
+      }
+
+      if (now() >= deadline) {
+        return false;
+      }
+
+      await sleep(pollIntervalMs);
     }
   }
 
-  async function buildSignedTransaction(request: SubmitRequest): Promise<{
+  async function buildSignedTransaction(
+    to: Hex | `0x${string}`,
+    data: Hex,
+    request?: Pick<SubmitRequest, "gasPriceWei" | "feeCapOverrides">,
+  ): Promise<{
     serializedTransaction: Hex;
     txHash: Hex;
   }> {
@@ -195,18 +295,15 @@ export function createFlashbotsSubmitter(
       );
     }
 
-    const calldata = encodeFunctionData({
-      abi: request.abi,
-      functionName: request.functionName,
-      args: request.args,
-    });
-
     const prepared = await walletClient.prepareTransactionRequest({
       account,
       chain: publicClient.chain,
-      to: request.to,
-      data: calldata,
+      to,
+      data,
       type: "eip1559",
+      ...(request?.feeCapOverrides ??
+        getEip1559FeeCapOverrides(request?.gasPriceWei) ??
+        {}),
     });
 
     const serializedTransaction = await account.signTransaction(prepared, {
@@ -218,23 +315,63 @@ export function createFlashbotsSubmitter(
     };
   }
 
+  async function buildSignedExecutionTransaction(request: SubmitRequest): Promise<{
+    serializedTransaction: Hex;
+    txHash: Hex;
+  }> {
+    const calldata = encodeFunctionData({
+      abi: request.abi,
+      functionName: request.functionName,
+      args: request.args,
+    });
+
+    return buildSignedTransaction(request.to, calldata, request);
+  }
+
+  async function buildSignedHealthCheckTransaction(): Promise<{
+    serializedTransaction: Hex;
+    txHash: Hex;
+  }> {
+    const account = walletClient.account;
+    if (!account) {
+      throw new Error("Flashbots health check requires a configured wallet account.");
+    }
+
+    return buildSignedTransaction(account.address, "0x");
+  }
+
   return {
     name: "flashbots",
     supportsLiveSubmission: true,
 
     async submit(request: SubmitRequest): Promise<SubmissionResult> {
-      const { serializedTransaction, txHash } =
-        await buildSignedTransaction(request);
+      if (hasRecentWritePathFailure()) {
+        throw new Error(
+          "Flashbots relay unhealthy, aborting bundle submission until the next health revalidation window.",
+        );
+      }
 
       let lastError: unknown;
 
       for (let attempt = 1; attempt <= maxBlockRetries; attempt++) {
         const latestBlock = await publicClient.getBlockNumber();
         const targetBlock = latestBlock + 1n;
+        let txHash: Hex | undefined;
 
         try {
+          const builtTransaction =
+            await buildSignedExecutionTransaction(request);
+          txHash = builtTransaction.txHash;
+          const { serializedTransaction } = builtTransaction;
           await simulateBundle(serializedTransaction, targetBlock);
-          const bundleHash = await sendBundle(serializedTransaction, targetBlock);
+          let bundleHash: string;
+          try {
+            bundleHash = await sendBundle(serializedTransaction, targetBlock);
+          } catch (error) {
+            recordWritePathHealth(false);
+            throw error;
+          }
+          recordWritePathHealth(true);
 
           logger.info("Flashbots bundle submitted", {
             functionName: request.functionName,
@@ -244,7 +381,22 @@ export function createFlashbotsSubmitter(
             attempt,
           });
 
-          const included = await waitForBundleInclusion(txHash, targetBlock);
+          let included: boolean;
+          try {
+            included = await waitForBundleInclusion(txHash, targetBlock);
+          } catch (error) {
+            throw createPendingSubmissionError(
+              {
+                txHash,
+                label: request.functionName,
+                mode: "flashbots",
+                bundleHash,
+                targetBlock,
+                privateSubmission: true,
+              },
+              `Flashbots bundle submission accepted by relay, but inclusion monitoring failed: ${getErrorMessage(error)}`,
+            );
+          }
           if (!included) {
             logger.warn("Flashbots bundle not included in target block", {
               txHash,
@@ -261,7 +413,6 @@ export function createFlashbotsSubmitter(
             bundleHash,
             targetBlock,
             privateSubmission: true,
-            relayUrl,
           };
         } catch (error) {
           lastError = error;
@@ -272,6 +423,16 @@ export function createFlashbotsSubmitter(
             attempt,
             error: getErrorMessage(error),
           });
+
+          if (error instanceof PendingSubmissionError) {
+            throw error;
+          }
+
+          if (hasRecentWritePathFailure()) {
+            throw new Error(
+              `Flashbots relay unhealthy, aborting remaining bundle retries until the next health revalidation window: ${getErrorMessage(error)}`,
+            );
+          }
         }
       }
 
@@ -282,18 +443,35 @@ export function createFlashbotsSubmitter(
 
     async isHealthy(): Promise<boolean> {
       try {
-        const response = await fetch(relayUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            jsonrpc: "2.0",
-            id: 1,
-            method: "eth_chainId",
-            params: [],
-          }),
-        });
-        return response.ok;
+        const latestBlock = await publicClient.getBlockNumber();
+        const targetBlock = latestBlock + 1n;
+        await simulateExecutionPath(targetBlock);
+        if (lastWritePathProbeAt == null) {
+          return await revalidateWritePath(targetBlock);
+        }
+        const ageMs = now() - lastWritePathProbeAt;
+        if (lastWritePathHealthy && ageMs < writePathHealthyCacheMs) {
+          return true;
+        }
+        if (!lastWritePathHealthy && ageMs < writePathFailureRetryMs) {
+          return false;
+        }
+        return await revalidateWritePath(targetBlock);
       } catch {
+        return false;
+      }
+    },
+
+    async preflightLiveSubmissionReadiness(): Promise<boolean> {
+      try {
+        const latestBlock = await publicClient.getBlockNumber();
+        const targetBlock = latestBlock + 1n;
+        await simulateExecutionPath(targetBlock);
+        await probeSendBundlePath(targetBlock);
+        recordWritePathHealth(true);
+        return true;
+      } catch {
+        recordWritePathHealth(false);
         return false;
       }
     },

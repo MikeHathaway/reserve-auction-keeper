@@ -14,15 +14,28 @@ services:
       # - ../secrets/trading.keystore.json:/run/secrets/trading.keystore.json:ro
       # - ../secrets/trading.keystore.password:/run/secrets/trading.keystore.password:ro
     ports:
-      - "8080:8080"
+      - "${HEALTH_CHECK_PORT:-8080}:${HEALTH_CHECK_PORT:-8080}"
     restart: unless-stopped
     stop_grace_period: 35s
-    env_file:
-      - ../.env
     environment:
       CONFIG_PATH: /app/config.json
-      LOG_LEVEL: info
+      HEALTH_CHECK_PORT: ${HEALTH_CHECK_PORT:-8080}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      COINGECKO_API_KEY_FILE: ${COINGECKO_API_KEY_FILE:-}
+      COINGECKO_API_PLAN: ${COINGECKO_API_PLAN:-auto}
+      ALCHEMY_API_KEY_FILE: ${ALCHEMY_API_KEY_FILE:-}
+      RPC_PROVIDER: ${RPC_PROVIDER:-}
+      RPC_API_KEY_FILE: ${RPC_API_KEY_FILE:-}
+      PRIVATE_KEY_FILE: ${PRIVATE_KEY_FILE:-}
+      FLASHBOTS_AUTH_KEY_FILE: ${FLASHBOTS_AUTH_KEY_FILE:-}
+      KEYSTORE_PATH: ${KEYSTORE_PATH:-}
+      KEYSTORE_PASSWORD_FILE: ${KEYSTORE_PASSWORD_FILE:-}
+      # Compose intentionally does not forward inline API keys, PRIVATE_KEY,
+      # FLASHBOTS_AUTH_KEY, or KEYSTORE_PASSWORD. Keep secrets in mounted files instead.
       # Example values to place in ../.env:
+      # COINGECKO_API_KEY_FILE=/run/secrets/coingecko.key
+      # ALCHEMY_API_KEY_FILE=/run/secrets/alchemy.key
+      # RPC_API_KEY_FILE=/run/secrets/rpc-provider.key
       # PRIVATE_KEY_FILE=/run/secrets/trading.key
       # FLASHBOTS_AUTH_KEY_FILE=/run/secrets/flashbots-auth.key
       # KEYSTORE_PATH=/run/secrets/trading.keystore.json

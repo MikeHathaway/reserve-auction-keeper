@@ -93,6 +93,29 @@ export function loadOptionalHexSecret(
   return undefined;
 }
 
+export function loadOptionalStringSecret(
+  env: NodeJS.ProcessEnv,
+  envKey: string,
+  fileEnvKey: string,
+): string | undefined {
+  const envValue = env[envKey]?.trim();
+  const filePath = env[fileEnvKey]?.trim();
+
+  if (envValue && filePath) {
+    throw new Error(`Configure only one of ${envKey} or ${fileEnvKey}`);
+  }
+
+  if (envValue) {
+    return envValue;
+  }
+
+  if (filePath) {
+    return readSecretFile(filePath, fileEnvKey);
+  }
+
+  return undefined;
+}
+
 function getKeystorePassword(env: NodeJS.ProcessEnv): string {
   const inlinePassword = env.KEYSTORE_PASSWORD?.trim();
   const passwordFile = env.KEYSTORE_PASSWORD_FILE?.trim();

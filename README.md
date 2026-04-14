@@ -23,11 +23,11 @@ Current status: funded strategy supports live execution. Mainnet uses a single-t
 - An Ethereum wallet with AJNA (Mainnet) or bwAJNA (Base) tokens
 - RPC endpoints for Mainnet and/or Base
 - Price API credentials for your chosen provider:
-  `COINGECKO_API_KEY` for `pricing.provider = "coingecko"` or `"hybrid"`
+  `COINGECKO_API_KEY` or `COINGECKO_API_KEY_FILE` for `pricing.provider = "coingecko"` or `"hybrid"`
   `COINGECKO_API_PLAN=demo|pro|auto` optionally pins the CoinGecko host/header, default `auto`
-  `ALCHEMY_API_KEY` for `pricing.provider = "alchemy"` or `"hybrid"`
+  `ALCHEMY_API_KEY` or `ALCHEMY_API_KEY_FILE` for `pricing.provider = "alchemy"` or `"hybrid"`
   `pricing.provider = "alchemy"` fails fast at startup if Alchemy cannot price that chain's AJNA token
-  `RPC_PROVIDER=alchemy` + `RPC_API_KEY` can be reused for Alchemy pricing automatically
+  `RPC_PROVIDER=alchemy` + `RPC_API_KEY` or `RPC_API_KEY_FILE` can be reused for Alchemy pricing automatically
 
 ### Setup
 
@@ -52,12 +52,12 @@ PRIVATE_KEY_FILE=./secrets/trading.key
 # KEYSTORE_PATH=./secrets/trading.keystore.json
 # KEYSTORE_PASSWORD_FILE=./secrets/trading.keystore.password
 
-COINGECKO_API_KEY=your_coingecko_api_key
+COINGECKO_API_KEY_FILE=./secrets/coingecko.key
 # Optional: auto-detect by default. Set demo for Demo keys to avoid a first-request fallback.
 # COINGECKO_API_PLAN=auto
-ALCHEMY_API_KEY=your_alchemy_price_api_key
+ALCHEMY_API_KEY_FILE=./secrets/alchemy.key
 RPC_PROVIDER=alchemy
-RPC_API_KEY=your_alchemy_key
+RPC_API_KEY_FILE=./secrets/rpc-provider.key
 
 # Recommended for stable mainnet Flashbots relay identity:
 FLASHBOTS_AUTH_KEY_FILE=./secrets/flashbots-auth.key
@@ -70,6 +70,8 @@ FLASHBOTS_AUTH_KEY_FILE=./secrets/flashbots-auth.key
     "base": {
       "enabled": true,
       "rpcUrl": "https://base-mainnet.g.alchemy.com/v2/your_key",
+      "privateRpcUrl": "https://base-private-rpc.example",
+      "privateRpcTrusted": false,
       "quoteTokens": {
         "ALT": {
           "address": "0x0000000000000000000000000000000000000010",
@@ -166,21 +168,28 @@ docker compose -f docker/docker-compose.yml up -d --build
 This runs the keeper as a long-lived service with:
 
 - `config.json` mounted read-only at `/app/config.json`
-- secret paths loaded from your local `.env` via Compose `env_file`
+- selected runtime variables interpolated from your local `.env`
+- only file-based API and wallet secret inputs forwarded into the container
 - a named Docker volume mounted at `/app/.cache/pool-discovery` so pool auto-discovery stays warm across restarts
-- the existing `/health` endpoint exposed on port `8080`
+- the existing `/health` endpoint exposed on port `8080` by default, or on `HEALTH_CHECK_PORT` when set in your local `.env`
 
 Recommended Docker secret pattern:
 
 1. Put secret files on the host, for example under `./secrets/`.
 2. In `.env`, point the bot at the in-container file paths:
    ```dotenv
+   HEALTH_CHECK_PORT=8080
+   COINGECKO_API_KEY_FILE=/run/secrets/coingecko.key
+   ALCHEMY_API_KEY_FILE=/run/secrets/alchemy.key
+   RPC_API_KEY_FILE=/run/secrets/rpc-provider.key
    PRIVATE_KEY_FILE=/run/secrets/trading.key
    FLASHBOTS_AUTH_KEY_FILE=/run/secrets/flashbots-auth.key
    # or:
    # KEYSTORE_PATH=/run/secrets/trading.keystore.json
    # KEYSTORE_PASSWORD_FILE=/run/secrets/trading.keystore.password
    ```
+   Compose intentionally does not pass inline API keys, `PRIVATE_KEY`,
+   `FLASHBOTS_AUTH_KEY`, or `KEYSTORE_PASSWORD` values through to the container.
 3. Copy [`docker/docker-compose.secrets.example.yml`](docker/docker-compose.secrets.example.yml) to `docker/docker-compose.override.yml` and edit the host-side bind mount paths if needed.
 4. Start Compose with the override:
    ```bash
@@ -191,6 +200,8 @@ Recommended Docker secret pattern:
    ```
 
 `docker/docker-compose.override.yml` is ignored by git so each operator can keep machine-specific secret paths locally.
+
+If you change `HEALTH_CHECK_PORT`, Compose now publishes the same host/container port and the container healthcheck probes that port too.
 
 ### systemd
 
@@ -251,7 +262,8 @@ Deploy the executor with:
 
 ```bash
 DEPLOY_CHAIN=base npm run deploy:flash-arb-executor
-DEPLOY_CHAIN=base npm run deploy:flash-arb-executor -- --broadcast --private-key "$DEPLOYER_PRIVATE_KEY"
+cast wallet import deployer --interactive
+DEPLOY_CHAIN=base npm run deploy:flash-arb-executor -- --broadcast --account deployer
 ```
 
 Set `FLASH_ARB_EXECUTOR_KIND` to choose the family:
@@ -260,7 +272,7 @@ Set `FLASH_ARB_EXECUTOR_KIND` to choose the family:
 - `v2v3`
 - `v3v2`
 
-The wrapper fills `FLASH_ARB_EXECUTOR_AJNA_TOKEN` plus the family-specific Uniswap router/factory defaults from the built-in chain preset for `mainnet`, `base`, `arbitrum`, `optimism`, or `polygon`, resolves the RPC URL from `DEPLOY_RPC_URL` or `RPC_PROVIDER` + `RPC_API_KEY`, and applies the family-specific constructor inputs. Override any constructor input with:
+The wrapper fills `FLASH_ARB_EXECUTOR_AJNA_TOKEN` plus the family-specific Uniswap router/factory defaults from the built-in chain preset for `mainnet`, `base`, `arbitrum`, `optimism`, or `polygon`, resolves the RPC URL from `DEPLOY_RPC_URL` or `RPC_PROVIDER` + `RPC_API_KEY` / `RPC_API_KEY_FILE`, and applies the family-specific constructor inputs. Override any constructor input with:
 
 - `FLASH_ARB_EXECUTOR_KIND`
 - `FLASH_ARB_EXECUTOR_AJNA_TOKEN`
@@ -268,6 +280,12 @@ The wrapper fills `FLASH_ARB_EXECUTOR_AJNA_TOKEN` plus the family-specific Unisw
 - `FLASH_ARB_EXECUTOR_UNISWAP_V2_FACTORY`
 - `FLASH_ARB_EXECUTOR_UNISWAP_V3_FACTORY`
 - `FLASH_ARB_EXECUTOR_UNISWAP_V3_POOL_INIT_CODE_HASH`
+
+The wrapper injects the resolved RPC URL through a Foundry RPC alias, refuses raw
+secret-bearing flags like `--private-key`, `--mnemonic`, and verifier API-key flags,
+and redacts any remaining key/secret/url-style forwarded args from its own logs. Use
+`--account`, `--keystore`, `--password-file`, and environment-based verifier API keys
+for live broadcasts instead.
 
 If you already have a custom RPC URL for the target network, set `DEPLOY_RPC_URL` directly instead of relying on provider-based auto-construction.
 
@@ -308,14 +326,15 @@ If you already have a custom RPC URL for the target network, set `DEPLOY_RPC_URL
 - **CoinGecko Demo and Pro keys are both supported.** `COINGECKO_API_PLAN=auto` will switch hosts if CoinGecko returns an auth host mismatch, and `demo`/`pro` lets you pin it up front.
 - **Custom quote tokens are config-driven and additive.** Add them under `chains.<chain>.quoteTokens` without changing source code. They merge with the built-in per-chain whitelist unless you explicitly override an existing symbol. In `coingecko` or `hybrid` mode, each new symbol also needs a `coingeckoId`.
 - **Prefer file or keystore secret inputs.** `PRIVATE_KEY_FILE` or `KEYSTORE_PATH` + `KEYSTORE_PASSWORD_FILE` keeps raw trading keys out of your shell environment.
+- **Prefer file-based API key inputs in Docker.** `COINGECKO_API_KEY_FILE`, `ALCHEMY_API_KEY_FILE`, and `RPC_API_KEY_FILE` keep third-party credentials out of `docker inspect`.
 - **Mainnet live mode uses single-tx Flashbots bundles.** The keeper prepares, signs, simulates, and submits a raw bundle, then retries across up to 3 target blocks.
 - **Persist the Flashbots auth key.** `FLASHBOTS_AUTH_KEY_FILE` keeps a stable relay identity across restarts instead of generating a fresh one every boot.
-- **Base and other `private-rpc` chains fail closed without a private RPC URL.** Live submission is disabled instead of silently degrading to public mempool.
+- **Base and other `private-rpc` chains fail closed without an explicitly trusted private RPC.** Set both `privateRpcUrl` and `privateRpcTrusted: true` before live mode; a URL alone is not treated as MEV-safe.
 - **Flash-arb requires at least one deployed family executor.** The keeper will refuse live flash-arb mode if a chain route is missing executable family mappings.
 - **Flash-arb route topology is validated before execution.** The keeper rejects paths that do not decode to quote-token -> AJNA, mixed-family configs with no executable source/swap family, V3 source reuse inside V3 swap routes, and flash sources that cannot currently cover the computed borrow amount.
 - **Callback verification remains protocol-specific and narrow.** `v3v3` and `v3v2` validate the Uniswap V3 flash callback against the configured factory/init code hash, while `v2v3` validates the Uniswap V2 flash pair against the configured factory mapping.
 - **Gas ceiling.** The bot skips execution during gas spikes.
-- **Health check.** HTTP endpoint at `/health` (default port 8080) for monitoring.
+- **Health check.** HTTP endpoint at `/health` (default port 8080) for monitoring. In Docker, `HEALTH_CHECK_PORT` can override the configured port so the app, container healthcheck, and published port stay aligned.
 - **Pool discovery is cached locally.** Auto-discovered pool lists are persisted under `.cache/pool-discovery` to make restarts and periodic rediscovery cheaper.
 
 ## Analytics

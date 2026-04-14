@@ -1,5 +1,7 @@
 import { formatEther, type Address, type Hex, type PublicClient } from "viem";
 import type { MevSubmitter, SubmissionResult } from "../execution/mev-submitter.js";
+import type { FeeCapOverrides } from "../execution/gas.js";
+import { waitForConfirmedReceipt } from "../execution/receipt.js";
 import { POOL_ABI } from "../contracts/abis/index.js";
 
 export interface KickAuctionResult extends SubmissionResult {
@@ -18,6 +20,8 @@ export async function kickReserveAuction(
   submitter: MevSubmitter,
   walletAddress: Address,
   pool: Address,
+  gasPriceWei?: bigint,
+  feeCapOverrides?: FeeCapOverrides,
 ): Promise<KickAuctionResult> {
   const submission = await submitter.submit({
     to: pool,
@@ -25,6 +29,8 @@ export async function kickReserveAuction(
     functionName: "kickReserveAuction",
     args: [],
     account: walletAddress,
+    gasPriceWei,
+    feeCapOverrides,
   });
 
   if (!submission.txHash) {
@@ -33,9 +39,12 @@ export async function kickReserveAuction(
     );
   }
 
-  const receipt = await publicClient.waitForTransactionReceipt({
-    hash: submission.txHash,
-  });
+  const receipt = await waitForConfirmedReceipt(
+    publicClient,
+    submission.txHash,
+    "kickReserveAuction",
+    { submission },
+  );
 
   if (receipt.status !== "success") {
     throw new Error(`kickReserveAuction transaction ${submission.txHash} reverted on-chain.`);

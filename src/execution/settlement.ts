@@ -6,6 +6,8 @@ import {
 } from "viem";
 import type { PriceData } from "../pricing/oracle.js";
 import { toNormalizedQuoteTokenAmount } from "../auction/math.js";
+import type { SubmissionResult } from "./mev-submitter.js";
+import { waitForConfirmedReceipt } from "./receipt.js";
 
 const ERC20_BALANCE_ABI = [
   {
@@ -38,6 +40,7 @@ export interface RealizedExecutionSettlement {
 interface SettlementContext {
   publicClient: PublicClient;
   txHash: Hex;
+  submission?: SubmissionResult;
   walletAddress: Address;
   ajnaToken: Address;
   quoteToken: Address;
@@ -92,9 +95,12 @@ export async function finalizeExecutionSettlement(
   before: BalanceSnapshot,
   context: SettlementContext,
 ): Promise<RealizedExecutionSettlement> {
-  const receipt = await context.publicClient.waitForTransactionReceipt({
-    hash: context.txHash,
-  });
+  const receipt = await waitForConfirmedReceipt(
+    context.publicClient,
+    context.txHash,
+    "execution",
+    { submission: context.submission },
+  );
 
   if (receipt.status !== "success") {
     throw new Error(`Transaction ${context.txHash} reverted on-chain.`);
