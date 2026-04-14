@@ -1,4 +1,4 @@
-FROM node:20-alpine AS builder
+FROM node:20-alpine@sha256:f598378b5240225e6beab68fa9f356db1fb8efe55173e6d4d8153113bb8f333c AS builder
 
 WORKDIR /app
 COPY package*.json ./
@@ -7,14 +7,16 @@ COPY tsconfig.json ./
 COPY src/ src/
 RUN npm run build
 
-FROM node:20-alpine
+FROM node:20-alpine@sha256:f598378b5240225e6beab68fa9f356db1fb8efe55173e6d4d8153113bb8f333c
 
+RUN addgroup -S keeper && adduser -S keeper -G keeper
 WORKDIR /app
 ENV NODE_ENV=production
 COPY package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=builder /app/dist/ dist/
-RUN mkdir -p /app/.cache/pool-discovery
+RUN mkdir -p /app/.cache/pool-discovery && chown -R keeper:keeper /app/.cache
+USER keeper
 
 # Config is mounted at runtime and secrets are passed via environment.
 # Discovery cache can be persisted by mounting /app/.cache/pool-discovery.
