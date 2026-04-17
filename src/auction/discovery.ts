@@ -12,6 +12,13 @@ import type { ChainConfig } from "../chains/index.js";
 import { logger } from "../utils/logger.js";
 import { retryAsync } from "../utils/retry.js";
 
+export interface PoolMetadata {
+  pool: Address;
+  quoteToken: Address;
+  quoteTokenScale: bigint;
+  quoteTokenSymbol: string;
+}
+
 export interface PoolReserveState {
   pool: Address;
   quoteToken: Address;
@@ -26,17 +33,23 @@ export interface PoolReserveState {
   isKickable: boolean;
 }
 
+interface PersistedPoolMetadata {
+  address: string;
+  quoteToken: string;
+  quoteTokenScale: string;
+}
+
 interface PoolDiscoveryCacheSnapshot {
   version: number;
   chain: string;
   factory: string;
   quoteTokens: string[];
   lastPoolCount: string;
-  pools: string[];
+  pools: PersistedPoolMetadata[];
   updatedAtBlock: string;
 }
 
-const DISCOVERY_CACHE_VERSION = 1;
+const DISCOVERY_CACHE_VERSION = 2;
 const DEFAULT_DISCOVERY_CACHE_DIR = join(process.cwd(), ".cache", "pool-discovery");
 
 function getWhitelistedQuoteTokens(chainConfig: ChainConfig): string[] {
@@ -56,12 +69,12 @@ function areSameStringArrays(left: string[], right: string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
-function dedupePools(pools: Address[]): Address[] {
+function dedupePoolMetadata(pools: PoolMetadata[]): PoolMetadata[] {
   const seen = new Set<string>();
-  const deduped: Address[] = [];
+  const deduped: PoolMetadata[] = [];
 
   for (const pool of pools) {
-    const key = pool.toLowerCase();
+    const key = pool.pool.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
     deduped.push(pool);
@@ -70,10 +83,20 @@ function dedupePools(pools: Address[]): Address[] {
   return deduped;
 }
 
+function buildQuoteTokenSymbolLookup(
+  chainConfig: ChainConfig,
+): Record<string, string> {
+  const lookup: Record<string, string> = {};
+  for (const [symbol, addr] of Object.entries(chainConfig.quoteTokens)) {
+    lookup[addr.toLowerCase()] = symbol;
+  }
+  return lookup;
+}
+
 async function loadDiscoveryCache(
   chainConfig: ChainConfig,
   cacheDir: string,
-): Promise<{ lastPoolCount: bigint; pools: Address[] } | null> {
+): Promise<{ lastPoolCount: bigint; pools: PoolMetadata[] } | null> {
   const cachePath = getDiscoveryCachePath(chainConfig, cacheDir);
 
   try {
@@ -91,13 +114,34 @@ async function loadDiscoveryCache(
     if (!areSameStringArrays(cachedQuoteTokens, expectedQuoteTokens)) return null;
 
     if (typeof parsed.lastPoolCount !== "string") return null;
-    if (!Array.isArray(parsed.pools) || !parsed.pools.every((pool) => typeof pool === "string" && isAddress(pool))) {
+    if (
+      !Array.isArray(parsed.pools) ||
+      !parsed.pools.every(
+        (entry) =>
+          entry != null &&
+          typeof entry === "object" &&
+          typeof entry.address === "string" &&
+          isAddress(entry.address) &&
+          typeof entry.quoteToken === "string" &&
+          isAddress(entry.quoteToken) &&
+          typeof entry.quoteTokenScale === "string",
+      )
+    ) {
       return null;
     }
 
+    const symbolLookup = buildQuoteTokenSymbolLookup(chainConfig);
+    const metadata: PoolMetadata[] = parsed.pools.map((entry) => ({
+      pool: entry.address as Address,
+      quoteToken: entry.quoteToken as Address,
+      quoteTokenScale: BigInt(entry.quoteTokenScale),
+      quoteTokenSymbol:
+        symbolLookup[entry.quoteToken.toLowerCase()] || "UNKNOWN",
+    }));
+
     return {
       lastPoolCount: BigInt(parsed.lastPoolCount),
-      pools: dedupePools(parsed.pools as Address[]),
+      pools: dedupePoolMetadata(metadata),
     };
   } catch (error) {
     if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
@@ -116,7 +160,7 @@ async function loadDiscoveryCache(
 async function saveDiscoveryCache(
   chainConfig: ChainConfig,
   cacheDir: string,
-  pools: Address[],
+  pools: PoolMetadata[],
   lastPoolCount: bigint,
   updatedAtBlock: bigint,
 ): Promise<void> {
@@ -129,7 +173,11 @@ async function saveDiscoveryCache(
     factory: chainConfig.poolFactory,
     quoteTokens: getWhitelistedQuoteTokens(chainConfig),
     lastPoolCount: lastPoolCount.toString(),
-    pools,
+    pools: pools.map((entry) => ({
+      address: entry.pool,
+      quoteToken: entry.quoteToken,
+      quoteTokenScale: entry.quoteTokenScale.toString(),
+    })),
     updatedAtBlock: updatedAtBlock.toString(),
   };
 
@@ -180,37 +228,66 @@ async function fetchDeployedPools(
   );
 }
 
-async function filterPoolsByQuoteToken(
+async function fetchPoolMetadata(
   client: PublicClient,
   chainConfig: ChainConfig,
   pools: Address[],
-): Promise<Address[]> {
+): Promise<PoolMetadata[]> {
   if (pools.length === 0) return [];
 
   const whitelistedQuoteTokens = new Set(getWhitelistedQuoteTokens(chainConfig));
+  const symbolLookup = buildQuoteTokenSymbolLookup(chainConfig);
+
   const quoteTokenCalls = pools.map((pool) => ({
     address: pool,
     abi: POOL_ABI,
     functionName: "quoteTokenAddress" as const,
   }));
 
-  const quoteTokenResults = await retryAsync(
-    () => client.multicall({ contracts: quoteTokenCalls }),
-    { label: `${chainConfig.name}.quoteTokenAddress` },
+  const quoteScaleCalls = pools.map((pool) => ({
+    address: pool,
+    abi: POOL_ABI,
+    functionName: "quoteTokenScale" as const,
+  }));
+
+  const [quoteTokenResults, quoteScaleResults] = await retryAsync(
+    () =>
+      Promise.all([
+        client.multicall({ contracts: quoteTokenCalls }),
+        client.multicall({ contracts: quoteScaleCalls }),
+      ]),
+    { label: `${chainConfig.name}.fetchPoolMetadata` },
   );
 
-  const filteredPools: Address[] = [];
+  const metadata: PoolMetadata[] = [];
   for (let i = 0; i < pools.length; i++) {
-    const result = quoteTokenResults[i];
+    const quoteTokenResult = quoteTokenResults[i];
+    const quoteScaleResult = quoteScaleResults[i];
+
     if (
-      result.status === "success" &&
-      whitelistedQuoteTokens.has((result.result as string).toLowerCase())
+      quoteTokenResult.status !== "success" ||
+      quoteScaleResult.status !== "success"
     ) {
-      filteredPools.push(pools[i]);
+      logger.warn("Failed to fetch pool metadata", {
+        pool: pools[i],
+        chain: chainConfig.name,
+      });
+      continue;
     }
+
+    const quoteToken = quoteTokenResult.result as Address;
+    const quoteTokenKey = quoteToken.toLowerCase();
+    if (!whitelistedQuoteTokens.has(quoteTokenKey)) continue;
+
+    metadata.push({
+      pool: pools[i],
+      quoteToken,
+      quoteTokenScale: quoteScaleResult.result as bigint,
+      quoteTokenSymbol: symbolLookup[quoteTokenKey] || "UNKNOWN",
+    });
   }
 
-  return filteredPools;
+  return metadata;
 }
 
 /**
@@ -222,14 +299,14 @@ export async function discoverPools(
   chainConfig: ChainConfig,
   configuredPools?: Address[],
   cacheDir: string = DEFAULT_DISCOVERY_CACHE_DIR,
-): Promise<Address[]> {
+): Promise<PoolMetadata[]> {
   // If pools are explicitly configured, use those
   if (configuredPools && configuredPools.length > 0) {
     logger.info("Using configured pool list", {
       chain: chainConfig.name,
       count: configuredPools.length,
     });
-    return configuredPools;
+    return fetchPoolMetadata(client, chainConfig, configuredPools);
   }
 
   // Auto-discover from PoolFactory
@@ -279,20 +356,20 @@ export async function discoverPools(
     startIndex,
     poolCount,
   );
-  const filteredDiscoveredPools = await filterPoolsByQuoteToken(
+  const newMetadata = await fetchPoolMetadata(
     client,
     chainConfig,
     discoveredPools,
   );
   const filteredPools = shouldIncrementallySync
-    ? dedupePools([...cached.pools, ...filteredDiscoveredPools])
-    : filteredDiscoveredPools;
+    ? dedupePoolMetadata([...cached.pools, ...newMetadata])
+    : newMetadata;
 
   logger.info("Filtered to whitelisted quote token pools", {
     chain: chainConfig.name,
     total: poolCount.toString(),
     filtered: filteredPools.length,
-    newPools: filteredDiscoveredPools.length,
+    newPools: newMetadata.length,
     mode: shouldIncrementallySync ? "incremental" : "full",
   });
 
@@ -309,65 +386,37 @@ export async function discoverPools(
 }
 
 /**
- * Fetch reserve state for a list of pools via multicall.
+ * Fetch mutable reserve state for a list of pools via multicall. Immutable
+ * metadata (quote token, scale, symbol) is reused from the discovery cache.
  */
 export async function getPoolReserveStates(
   client: PublicClient,
   chainConfig: ChainConfig,
-  pools: Address[],
+  pools: PoolMetadata[],
 ): Promise<PoolReserveState[]> {
   if (pools.length === 0) return [];
 
-  // Multicall: PoolInfoUtils.poolReservesInfo(pool) + quoteTokenAddress
-  const reservesCalls = pools.map((pool) => ({
+  const reservesCalls = pools.map((entry) => ({
     address: chainConfig.poolInfoUtils,
     abi: POOL_INFO_UTILS_ABI,
     functionName: "poolReservesInfo" as const,
-    args: [pool] as const,
+    args: [entry.pool] as const,
   }));
 
-  const quoteTokenCalls = pools.map((pool) => ({
-    address: pool,
-    abi: POOL_ABI,
-    functionName: "quoteTokenAddress" as const,
-  }));
-
-  const quoteScaleCalls = pools.map((pool) => ({
-    address: pool,
-    abi: POOL_ABI,
-    functionName: "quoteTokenScale" as const,
-  }));
-
-  const [reservesResults, quoteTokenResults, quoteScaleResults] = await retryAsync(
-    () =>
-      Promise.all([
-        client.multicall({ contracts: reservesCalls }),
-        client.multicall({ contracts: quoteTokenCalls }),
-        client.multicall({ contracts: quoteScaleCalls }),
-      ]),
+  const reservesResults = await retryAsync(
+    () => client.multicall({ contracts: reservesCalls }),
     { label: `${chainConfig.name}.getPoolReserveStates` },
   );
-
-  // Build reverse lookup: address → symbol
-  const addressToSymbol: Record<string, string> = {};
-  for (const [symbol, addr] of Object.entries(chainConfig.quoteTokens)) {
-    addressToSymbol[addr.toLowerCase()] = symbol;
-  }
 
   const states: PoolReserveState[] = [];
 
   for (let i = 0; i < pools.length; i++) {
     const reserveResult = reservesResults[i];
-    const quoteResult = quoteTokenResults[i];
-    const quoteScaleResult = quoteScaleResults[i];
+    const metadata = pools[i];
 
-    if (
-      reserveResult.status !== "success" ||
-      quoteResult.status !== "success" ||
-      quoteScaleResult.status !== "success"
-    ) {
+    if (reserveResult.status !== "success") {
       logger.warn("Failed to read pool state", {
-        pool: pools[i],
+        pool: metadata.pool,
         chain: chainConfig.name,
       });
       continue;
@@ -376,18 +425,14 @@ export async function getPoolReserveStates(
     const [reserves, claimableReserves, claimableReservesRemaining, auctionPrice, timeRemaining] =
       reserveResult.result as [bigint, bigint, bigint, bigint, bigint];
 
-    const quoteToken = quoteResult.result as Address;
-    const quoteTokenScale = quoteScaleResult.result as bigint;
-    const quoteTokenSymbol = addressToSymbol[quoteToken.toLowerCase()] || "UNKNOWN";
-
     const hasActiveAuction = claimableReservesRemaining > 0n && timeRemaining > 0n;
     const isKickable = claimableReserves > 0n && !hasActiveAuction;
 
     if (hasActiveAuction) {
       logger.debug("Active auction found", {
-        pool: pools[i],
+        pool: metadata.pool,
         chain: chainConfig.name,
-        quoteToken: quoteTokenSymbol,
+        quoteToken: metadata.quoteTokenSymbol,
         remaining: formatEther(claimableReservesRemaining),
         auctionPrice: formatEther(auctionPrice),
         timeRemainingHours: Number(timeRemaining) / 3600,
@@ -395,10 +440,10 @@ export async function getPoolReserveStates(
     }
 
     states.push({
-      pool: pools[i],
-      quoteToken,
-      quoteTokenScale,
-      quoteTokenSymbol,
+      pool: metadata.pool,
+      quoteToken: metadata.quoteToken,
+      quoteTokenScale: metadata.quoteTokenScale,
+      quoteTokenSymbol: metadata.quoteTokenSymbol,
       reserves,
       claimableReserves,
       claimableReservesRemaining,
