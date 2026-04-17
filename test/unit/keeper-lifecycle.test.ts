@@ -10,7 +10,6 @@ const PRIVATE_KEY = `0x${"11".repeat(32)}`;
 const {
   mockDiscoverPools,
   mockGetPoolReserveStates,
-  mockGetAuctionPrices,
   mockCanKickReserveAuction,
   mockEstimateKickClaimableValueUsd,
   mockKickReserveAuction,
@@ -47,7 +46,6 @@ const {
   return {
     mockDiscoverPools: vi.fn(),
     mockGetPoolReserveStates: vi.fn(),
-    mockGetAuctionPrices: vi.fn(),
     mockCanKickReserveAuction: vi.fn(),
     mockEstimateKickClaimableValueUsd: vi.fn(),
     mockKickReserveAuction: vi.fn(),
@@ -155,10 +153,6 @@ vi.mock("../../src/auction/discovery.js", () => ({
 vi.mock("../../src/auction/kick.js", () => ({
   estimateKickClaimableValueUsd: mockEstimateKickClaimableValueUsd,
   kickReserveAuction: mockKickReserveAuction,
-}));
-
-vi.mock("../../src/auction/auction-price.js", () => ({
-  getAuctionPrices: mockGetAuctionPrices,
 }));
 
 vi.mock("../../src/pricing/coingecko.js", () => ({
@@ -304,7 +298,6 @@ describe("keeper lifecycle", () => {
 
     mockDiscoverPools.mockResolvedValue([]);
     mockGetPoolReserveStates.mockResolvedValue([]);
-    mockGetAuctionPrices.mockResolvedValue(new Map());
     mockCanKickReserveAuction.mockResolvedValue(false);
     mockEstimateKickClaimableValueUsd.mockReturnValue(0);
     mockGetPricesForQuoteTokens.mockResolvedValue(new Map());
@@ -415,15 +408,6 @@ describe("keeper lifecycle", () => {
         requestShutdown();
         return [];
       });
-    mockGetAuctionPrices.mockResolvedValue(new Map([
-      [activePoolState.pool, {
-        pool: activePoolState.pool,
-        auctionPrice: parseEther("2"),
-        auctionPriceFormatted: "2.0",
-        timeRemaining: 3600n,
-        timeRemainingHours: 1,
-      }],
-    ]));
     mockGetPricesForQuoteTokens.mockResolvedValue(new Map([
       ["USDC", {
         ajnaPriceUsd: 0.2,
@@ -565,22 +549,6 @@ describe("keeper lifecycle", () => {
     mockCreateFlashbotsSubmitter.mockReturnValue(flashbotsSubmitter);
     mockDiscoverPools.mockResolvedValue([firstPoolState.pool, secondPoolState.pool]);
     mockGetPoolReserveStates.mockResolvedValue([firstPoolState, secondPoolState]);
-    mockGetAuctionPrices.mockResolvedValue(new Map([
-      [firstPoolState.pool, {
-        pool: firstPoolState.pool,
-        auctionPrice: parseEther("2"),
-        auctionPriceFormatted: "2.0",
-        timeRemaining: 3600n,
-        timeRemainingHours: 1,
-      }],
-      [secondPoolState.pool, {
-        pool: secondPoolState.pool,
-        auctionPrice: parseEther("2"),
-        auctionPriceFormatted: "2.0",
-        timeRemaining: 3600n,
-        timeRemainingHours: 1,
-      }],
-    ]));
     mockGetPricesForQuoteTokens.mockResolvedValue(new Map([
       ["USDC", {
         ajnaPriceUsd: 0.2,
@@ -654,22 +622,6 @@ describe("keeper lifecycle", () => {
     }));
     mockDiscoverPools.mockResolvedValue([firstPoolState.pool, secondPoolState.pool]);
     mockGetPoolReserveStates.mockResolvedValue([firstPoolState, secondPoolState]);
-    mockGetAuctionPrices.mockResolvedValue(new Map([
-      [firstPoolState.pool, {
-        pool: firstPoolState.pool,
-        auctionPrice: parseEther("2"),
-        auctionPriceFormatted: "2.0",
-        timeRemaining: 3600n,
-        timeRemainingHours: 1,
-      }],
-      [secondPoolState.pool, {
-        pool: secondPoolState.pool,
-        auctionPrice: parseEther("2"),
-        auctionPriceFormatted: "2.0",
-        timeRemaining: 3600n,
-        timeRemainingHours: 1,
-      }],
-    ]));
     mockGetPricesForQuoteTokens.mockResolvedValue(new Map([
       ["USDC", {
         ajnaPriceUsd: 0.2,
@@ -748,22 +700,6 @@ describe("keeper lifecycle", () => {
 
     mockDiscoverPools.mockResolvedValue([firstPoolState.pool, secondPoolState.pool]);
     mockGetPoolReserveStates.mockResolvedValue([firstPoolState, secondPoolState]);
-    mockGetAuctionPrices.mockResolvedValue(new Map([
-      [firstPoolState.pool, {
-        pool: firstPoolState.pool,
-        auctionPrice: parseEther("2"),
-        auctionPriceFormatted: "2.0",
-        timeRemaining: 3600n,
-        timeRemainingHours: 1,
-      }],
-      [secondPoolState.pool, {
-        pool: secondPoolState.pool,
-        auctionPrice: parseEther("2"),
-        auctionPriceFormatted: "2.0",
-        timeRemaining: 3600n,
-        timeRemainingHours: 1,
-      }],
-    ]));
     mockGetPricesForQuoteTokens.mockResolvedValue(new Map([
       ["USDC", {
         ajnaPriceUsd: 0.2,
@@ -973,15 +909,6 @@ describe("keeper lifecycle", () => {
         requestShutdown();
         return [];
       });
-    mockGetAuctionPrices.mockResolvedValue(new Map([
-      [activePoolState.pool, {
-        pool: activePoolState.pool,
-        auctionPrice: parseEther("2"),
-        auctionPriceFormatted: "2.0",
-        timeRemaining: 3600n,
-        timeRemainingHours: 1,
-      }],
-    ]));
     mockGetPricesForQuoteTokens.mockResolvedValue(new Map([
       ["USDC", {
         ajnaPriceUsd: 0.2,

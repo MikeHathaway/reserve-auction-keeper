@@ -83,6 +83,9 @@ export function createFundedStrategy(
     | { key: string; balance: bigint; plan: FundedExecutionPlan | null }
     | null = null;
 
+  const allowanceCache = new Map<Address, { value: bigint; expiresAt: number }>();
+  const ALLOWANCE_CACHE_TTL_MS = 10 * 60_000;
+
   async function getAjnaBalance(): Promise<bigint> {
     return publicClient.readContract({
       address: ajnaToken,
@@ -93,11 +96,25 @@ export function createFundedStrategy(
   }
 
   async function getAllowance(pool: Address): Promise<bigint> {
-    return publicClient.readContract({
+    const now = Date.now();
+    const cached = allowanceCache.get(pool);
+    if (cached && cached.expiresAt > now) {
+      return cached.value;
+    }
+    const value = await publicClient.readContract({
       address: ajnaToken,
       abi: ERC20_ABI,
       functionName: "allowance",
       args: [walletAddress, pool],
+    });
+    allowanceCache.set(pool, { value, expiresAt: now + ALLOWANCE_CACHE_TTL_MS });
+    return value;
+  }
+
+  function recordApprovedAllowance(pool: Address, amount: bigint): void {
+    allowanceCache.set(pool, {
+      value: amount,
+      expiresAt: Date.now() + ALLOWANCE_CACHE_TTL_MS,
     });
   }
 
@@ -317,6 +334,7 @@ export function createFundedStrategy(
     if (receipt.status !== "success") {
       throw new Error(`Approval transaction ${submission.txHash} reverted on-chain.`);
     }
+    recordApprovedAllowance(pool, amount);
     logger.info("AJNA approval confirmed", {
       pool,
       txHash: submission.txHash,

@@ -8,12 +8,16 @@ import {
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import type { AppConfig, ResolvedChainConfig } from "./config.js";
-import { discoverPools, getPoolReserveStates, canKickReserveAuction } from "./auction/discovery.js";
+import {
+  discoverPools,
+  getPoolReserveStates,
+  canKickReserveAuction,
+  type PoolMetadata,
+} from "./auction/discovery.js";
 import {
   estimateKickClaimableValueUsd,
   kickReserveAuction,
 } from "./auction/kick.js";
-import { getAuctionPrices } from "./auction/auction-price.js";
 import { createCoingeckoClient } from "./pricing/coingecko.js";
 import {
   createAlchemyPricesClient,
@@ -64,7 +68,7 @@ interface ChainKeeper {
   walletClient: WalletClient;
   strategy: ExecutionStrategy;
   submitter: MevSubmitter;
-  pools: Address[];
+  pools: PoolMetadata[];
 }
 
 type PendingSubmissionState = PendingSubmissionRecord;
@@ -261,7 +265,8 @@ function createChainKeeper(
 
   const publicClient = createPublicClient({
     chain: resolved.chainConfig.chain,
-    transport: http(resolved.rpcUrl),
+    transport: http(resolved.rpcUrl, { batch: true }),
+    batch: { multicall: true },
   });
 
   // For MEV-protected submission, use private RPC transport if available
@@ -273,7 +278,7 @@ function createChainKeeper(
   const walletClient = createWalletClient({
     account,
     chain: resolved.chainConfig.chain,
-    transport: http(walletTransportUrl),
+    transport: http(walletTransportUrl, { batch: true }),
   });
 
   const submitter: MevSubmitter =
@@ -777,7 +782,9 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
   logger.info("Starting keeper loop", { chain: chainName });
 
   let rediscoveryCounter = 0;
-  const REDISCOVERY_INTERVAL = 50; // Re-discover pools every 50 cycles
+  const REDISCOVERY_INTERVAL = 200; // Re-discover pools every 200 cycles
+  const kickSimulationCache = new Map<string, { result: boolean; expiresAt: number }>();
+  const KICK_SIMULATION_CACHE_TTL_MS = 5 * 60_000;
   const EXECUTION_GAS_UNITS = 200_000n;
   const KICK_RESERVE_AUCTION_GAS_UNITS = 120_000n;
   const MAX_CONSECUTIVE_TRANSIENT_ERRORS = 5;
@@ -857,13 +864,7 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
       const activeAuctions = poolStates.filter((s) => s.hasActiveAuction);
       const kickable = poolStates.filter((s) => s.isKickable);
 
-      // 3. Get auction prices for active auctions
-      const activePools = activeAuctions.map((a) => a.pool);
-      const auctionPrices = await getAuctionPrices(
-        publicClient,
-        chainConfig.chainConfig,
-        activePools,
-      );
+      // 3. Collect quote token symbols (auction prices are already in poolStates)
       const quoteTokenSymbols = [...new Set(
         [...activeAuctions, ...kickable].map((poolState) => poolState.quoteTokenSymbol),
       )];
@@ -916,9 +917,6 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
       for (const poolState of activeAuctions) {
         if (shutdownRequested || pauseFurtherLiveSubmissions) break;
 
-        const priceInfo = auctionPrices.get(poolState.pool);
-        if (!priceInfo) continue;
-
         const prices = priceCache.get(poolState.quoteTokenSymbol) ?? null;
         if (!prices) continue;
 
@@ -932,7 +930,7 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
 
         const ctx: AuctionContext = {
           poolState,
-          auctionPrice: priceInfo.auctionPrice,
+          auctionPrice: poolState.auctionPrice,
           prices,
           chainName,
           gasPriceWei: gasPrice!,
@@ -1101,7 +1099,19 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
           continue;
         }
 
-        const canKick = await canKickReserveAuction(publicClient, poolState.pool);
+        const kickCacheKey = poolState.pool;
+        const cachedKick = kickSimulationCache.get(kickCacheKey);
+        const kickCheckNowMs = Date.now();
+        let canKick: boolean;
+        if (cachedKick && cachedKick.expiresAt > kickCheckNowMs) {
+          canKick = cachedKick.result;
+        } else {
+          canKick = await canKickReserveAuction(publicClient, poolState.pool);
+          kickSimulationCache.set(kickCacheKey, {
+            result: canKick,
+            expiresAt: kickCheckNowMs + KICK_SIMULATION_CACHE_TTL_MS,
+          });
+        }
         if (!canKick) {
           logger.debug("Cannot kick auction (unsettled liquidations or other reason)", {
             chain: chainName,
