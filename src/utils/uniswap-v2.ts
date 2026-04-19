@@ -80,12 +80,41 @@ export function validateUniswapV2PathEndpoints(
   return null;
 }
 
+// Module-scoped is safe across chains because the cache key includes the
+// factory address, and Uniswap V2 factory addresses are unique per chain.
+// Pair addresses are immutable once created, so positive results never expire.
+const pairAddressCache = new Map<string, Address>();
+
+function pairAddressCacheKey(
+  factoryAddress: Address,
+  tokenA: Address,
+  tokenB: Address,
+): string {
+  const factoryKey = getAddress(factoryAddress).toLowerCase();
+  const tokenKeyA = getAddress(tokenA).toLowerCase();
+  const tokenKeyB = getAddress(tokenB).toLowerCase();
+  const [token0Key, token1Key] = tokenKeyA < tokenKeyB
+    ? [tokenKeyA, tokenKeyB]
+    : [tokenKeyB, tokenKeyA];
+  return `${factoryKey}:${token0Key}:${token1Key}`;
+}
+
+export function clearUniswapV2PairAddressCache(): void {
+  pairAddressCache.clear();
+}
+
 export async function getUniswapV2PairAddress(
   publicClient: PublicClient,
   factoryAddress: Address,
   tokenA: Address,
   tokenB: Address,
 ): Promise<Address | null> {
+  const cacheKey = pairAddressCacheKey(factoryAddress, tokenA, tokenB);
+  const cached = pairAddressCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
   const pairAddress = await publicClient.readContract({
     address: factoryAddress,
     abi: UNISWAP_V2_FACTORY_ABI,
@@ -94,9 +123,12 @@ export async function getUniswapV2PairAddress(
   });
 
   const normalizedPair = getAddress(pairAddress as Address);
-  return normalizedPair === "0x0000000000000000000000000000000000000000"
-    ? null
-    : normalizedPair;
+  if (normalizedPair === "0x0000000000000000000000000000000000000000") {
+    return null;
+  }
+
+  pairAddressCache.set(cacheKey, normalizedPair);
+  return normalizedPair;
 }
 
 export async function readUniswapV2PairState(

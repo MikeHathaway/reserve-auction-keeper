@@ -23,6 +23,12 @@ const DEFAULT_RELAY_HTTP_TIMEOUT_MS = 10_000;
 const DEFAULT_RECEIPT_VISIBILITY_TIMEOUT_MS = 5_000;
 const DEFAULT_WRITE_PATH_HEALTHY_CACHE_MS = 60_000;
 const DEFAULT_WRITE_PATH_FAILURE_RETRY_MS = 5_000;
+// Read-path probe runs eth_callBundle to confirm the relay can parse and
+// simulate a signed transaction. It exercises more relay-side logic than the
+// write probe (which just checks endpoint reachability), so refresh more often
+// to catch relay regressions sooner.
+const DEFAULT_READ_PATH_HEALTHY_CACHE_MS = 30_000;
+const DEFAULT_READ_PATH_FAILURE_RETRY_MS = 5_000;
 
 interface FlashbotsOptions {
   relayUrl?: string;
@@ -33,6 +39,8 @@ interface FlashbotsOptions {
   receiptVisibilityTimeoutMs?: number;
   writePathRevalidationIntervalMs?: number;
   writePathFailureRetryMs?: number;
+  readPathRevalidationIntervalMs?: number;
+  readPathFailureRetryMs?: number;
   now?: () => number;
 }
 
@@ -91,10 +99,16 @@ export function createFlashbotsSubmitter(
     options.writePathRevalidationIntervalMs ?? DEFAULT_WRITE_PATH_HEALTHY_CACHE_MS;
   const writePathFailureRetryMs =
     options.writePathFailureRetryMs ?? DEFAULT_WRITE_PATH_FAILURE_RETRY_MS;
+  const readPathHealthyCacheMs =
+    options.readPathRevalidationIntervalMs ?? DEFAULT_READ_PATH_HEALTHY_CACHE_MS;
+  const readPathFailureRetryMs =
+    options.readPathFailureRetryMs ?? DEFAULT_READ_PATH_FAILURE_RETRY_MS;
   const now = options.now || Date.now;
   const flashbotsAuthKey = authKey ?? generateEphemeralPrivateKey();
   let lastWritePathProbeAt: number | null = null;
   let lastWritePathHealthy = false;
+  let lastReadPathProbeAt: number | null = null;
+  let lastReadPathHealthy = false;
 
   if (!authKey) {
     logger.warn(
@@ -221,6 +235,48 @@ export function createFlashbotsSubmitter(
   function recordWritePathHealth(healthy: boolean) {
     lastWritePathProbeAt = now();
     lastWritePathHealthy = healthy;
+  }
+
+  function recordReadPathHealth(healthy: boolean) {
+    lastReadPathProbeAt = now();
+    lastReadPathHealthy = healthy;
+  }
+
+  async function ensureReadPathHealthy(): Promise<{
+    healthy: boolean;
+    targetBlock: bigint | null;
+  }> {
+    if (lastReadPathProbeAt != null) {
+      const ageMs = now() - lastReadPathProbeAt;
+      if (lastReadPathHealthy && ageMs < readPathHealthyCacheMs) {
+        return { healthy: true, targetBlock: null };
+      }
+      if (!lastReadPathHealthy && ageMs < readPathFailureRetryMs) {
+        return { healthy: false, targetBlock: null };
+      }
+    }
+
+    // getBlockNumber hits the regular chain RPC, not the Flashbots relay.
+    // An upstream RPC failure shouldn't poison the relay-side read-path cache.
+    let targetBlock: bigint;
+    try {
+      const latestBlock = await publicClient.getBlockNumber();
+      targetBlock = latestBlock + 1n;
+    } catch (error) {
+      logger.debug("Flashbots health check skipped: upstream RPC getBlockNumber failed", {
+        error: getErrorMessage(error),
+      });
+      return { healthy: false, targetBlock: null };
+    }
+
+    try {
+      await simulateExecutionPath(targetBlock);
+      recordReadPathHealth(true);
+      return { healthy: true, targetBlock };
+    } catch {
+      recordReadPathHealth(false);
+      return { healthy: false, targetBlock: null };
+    }
   }
 
   function hasRecentWritePathFailure(): boolean {
@@ -442,13 +498,10 @@ export function createFlashbotsSubmitter(
     },
 
     async isHealthy(): Promise<boolean> {
-      try {
-        const latestBlock = await publicClient.getBlockNumber();
-        const targetBlock = latestBlock + 1n;
-        await simulateExecutionPath(targetBlock);
-        if (lastWritePathProbeAt == null) {
-          return await revalidateWritePath(targetBlock);
-        }
+      const readResult = await ensureReadPathHealthy();
+      if (!readResult.healthy) return false;
+
+      if (lastWritePathProbeAt != null) {
         const ageMs = now() - lastWritePathProbeAt;
         if (lastWritePathHealthy && ageMs < writePathHealthyCacheMs) {
           return true;
@@ -456,17 +509,45 @@ export function createFlashbotsSubmitter(
         if (!lastWritePathHealthy && ageMs < writePathFailureRetryMs) {
           return false;
         }
-        return await revalidateWritePath(targetBlock);
-      } catch {
-        return false;
       }
+
+      let targetBlock: bigint;
+      if (readResult.targetBlock != null) {
+        targetBlock = readResult.targetBlock;
+      } else {
+        try {
+          const latestBlock = await publicClient.getBlockNumber();
+          targetBlock = latestBlock + 1n;
+        } catch (error) {
+          // Upstream RPC failure — don't poison relay-side write-path cache.
+          logger.debug("Flashbots write-path revalidation skipped: upstream RPC getBlockNumber failed", {
+            error: getErrorMessage(error),
+          });
+          return false;
+        }
+      }
+      return await revalidateWritePath(targetBlock);
     },
 
     async preflightLiveSubmissionReadiness(): Promise<boolean> {
+      let targetBlock: bigint;
       try {
         const latestBlock = await publicClient.getBlockNumber();
-        const targetBlock = latestBlock + 1n;
+        targetBlock = latestBlock + 1n;
+      } catch (error) {
+        logger.debug("Flashbots preflight skipped: upstream RPC getBlockNumber failed", {
+          error: getErrorMessage(error),
+        });
+        return false;
+      }
+      try {
         await simulateExecutionPath(targetBlock);
+        recordReadPathHealth(true);
+      } catch {
+        recordReadPathHealth(false);
+        return false;
+      }
+      try {
         await probeSendBundlePath(targetBlock);
         recordWritePathHealth(true);
         return true;

@@ -86,13 +86,24 @@ export function createFundedStrategy(
   const allowanceCache = new Map<Address, { value: bigint; expiresAt: number }>();
   const ALLOWANCE_CACHE_TTL_MS = 10 * 60_000;
 
+  let cachedAjnaBalance: bigint | null = null;
+
   async function getAjnaBalance(): Promise<bigint> {
-    return publicClient.readContract({
+    if (cachedAjnaBalance !== null) {
+      return cachedAjnaBalance;
+    }
+    const balance = await publicClient.readContract({
       address: ajnaToken,
       abi: ERC20_ABI,
       functionName: "balanceOf",
       args: [walletAddress],
     });
+    cachedAjnaBalance = balance;
+    return balance;
+  }
+
+  function invalidateAjnaBalance(): void {
+    cachedAjnaBalance = null;
   }
 
   async function getAllowance(pool: Address): Promise<bigint> {
@@ -348,6 +359,10 @@ export function createFundedStrategy(
   return {
     name: "funded",
 
+    beginTick(): void {
+      invalidateAjnaBalance();
+    },
+
     async canExecute(ctx: AuctionContext): Promise<boolean> {
       const { poolState, auctionPrice, prices } = ctx;
       const plan = await getExecutionPlan(ctx);
@@ -485,6 +500,8 @@ export function createFundedStrategy(
         prices: ctx.prices,
         nativeTokenPriceUsd: config.nativeTokenPriceUsd,
       });
+
+      invalidateAjnaBalance();
 
       return {
         submissionMode: submission.mode,

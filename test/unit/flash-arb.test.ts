@@ -640,6 +640,71 @@ describe("flash-arb strategy", () => {
       chainName: "base",
     })).resolves.toBe(0);
   });
+
+  it("reuses inspected source state across pools sharing a flash source within a tick", async () => {
+    const { strategy, publicClient } = makeStrategy();
+
+    strategy.beginTick?.();
+
+    const ctxA = makeContext({
+      poolState: {
+        ...makeContext().poolState,
+        pool: "0xaaa1111111111111111111111111111111111111",
+      },
+    });
+    const ctxB = makeContext({
+      poolState: {
+        ...makeContext().poolState,
+        pool: "0xbbb2222222222222222222222222222222222222",
+      },
+    });
+
+    await strategy.estimateProfit(ctxA);
+    await strategy.estimateProfit(ctxB);
+
+    const sourceIdentityCalls = publicClient.readContract.mock.calls.filter(
+      ([args]) =>
+        args.address === V3_FLASH_POOL_ADDRESS &&
+        ["token0", "token1", "fee", "liquidity"].includes(args.functionName),
+    );
+    const sourceBalanceCalls = publicClient.readContract.mock.calls.filter(
+      ([args]) =>
+        args.address === BASE_CONFIG.ajnaToken &&
+        args.functionName === "balanceOf" &&
+        args.args?.[0] === V3_FLASH_POOL_ADDRESS,
+    );
+
+    expect(sourceIdentityCalls).toHaveLength(4);
+    expect(sourceBalanceCalls).toHaveLength(1);
+  });
+
+  it("re-inspects flash sources after beginTick clears the cache", async () => {
+    const { strategy, publicClient } = makeStrategy();
+
+    strategy.beginTick?.();
+    await strategy.estimateProfit(makeContext({
+      poolState: {
+        ...makeContext().poolState,
+        pool: "0xaaa1111111111111111111111111111111111111",
+      },
+    }));
+
+    strategy.beginTick?.();
+    await strategy.estimateProfit(makeContext({
+      poolState: {
+        ...makeContext().poolState,
+        pool: "0xbbb2222222222222222222222222222222222222",
+      },
+    }));
+
+    const sourceBalanceCalls = publicClient.readContract.mock.calls.filter(
+      ([args]) =>
+        args.address === BASE_CONFIG.ajnaToken &&
+        args.functionName === "balanceOf" &&
+        args.args?.[0] === V3_FLASH_POOL_ADDRESS,
+    );
+    expect(sourceBalanceCalls).toHaveLength(2);
+  });
 });
 
 function createStrategyWithProfitFloor(route: ReturnType<typeof makeRoute>, minProfitUsd: number) {

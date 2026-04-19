@@ -15,11 +15,19 @@ import { createPendingSubmissionError } from "./receipt.js";
 
 const DEFAULT_WRITE_PATH_HEALTHY_CACHE_MS = 60_000;
 const DEFAULT_WRITE_PATH_FAILURE_RETRY_MS = 5_000;
+// Read-path probe (getBlockNumber against the private endpoint) is cheap and
+// exercises a different code path than the write probe (junk eth_sendRawTransaction).
+// Refreshed more often than the write TTL so endpoint-level read failures are
+// detected within ~half the write-revalidation window.
+const DEFAULT_READ_PATH_HEALTHY_CACHE_MS = 30_000;
+const DEFAULT_READ_PATH_FAILURE_RETRY_MS = 5_000;
 
 interface PrivateRpcOptions {
   now?: () => number;
   writePathRevalidationIntervalMs?: number;
   writePathFailureRetryMs?: number;
+  readPathRevalidationIntervalMs?: number;
+  readPathFailureRetryMs?: number;
 }
 
 function isExpectedRawTransactionProbeError(error: unknown): boolean {
@@ -107,8 +115,14 @@ export function createPrivateRpcSubmitter(
     options.writePathRevalidationIntervalMs ?? DEFAULT_WRITE_PATH_HEALTHY_CACHE_MS;
   const writePathFailureRetryMs =
     options.writePathFailureRetryMs ?? DEFAULT_WRITE_PATH_FAILURE_RETRY_MS;
+  const readPathHealthyCacheMs =
+    options.readPathRevalidationIntervalMs ?? DEFAULT_READ_PATH_HEALTHY_CACHE_MS;
+  const readPathFailureRetryMs =
+    options.readPathFailureRetryMs ?? DEFAULT_READ_PATH_FAILURE_RETRY_MS;
   let lastWritePathProbeAt: number | null = null;
   let lastWritePathHealthy = false;
+  let lastReadPathProbeAt: number | null = null;
+  let lastReadPathHealthy = false;
 
   if (!effectiveUrl) {
     logger.warn(
@@ -124,6 +138,29 @@ export function createPrivateRpcSubmitter(
   function recordWritePathHealth(healthy: boolean) {
     lastWritePathProbeAt = now();
     lastWritePathHealthy = healthy;
+  }
+
+  function recordReadPathHealth(healthy: boolean) {
+    lastReadPathProbeAt = now();
+    lastReadPathHealthy = healthy;
+  }
+
+  async function ensureReadPathHealthy(
+    testClient: ReturnType<typeof createHealthCheckClient>,
+  ): Promise<boolean> {
+    if (lastReadPathProbeAt != null) {
+      const ageMs = now() - lastReadPathProbeAt;
+      if (lastReadPathHealthy && ageMs < readPathHealthyCacheMs) return true;
+      if (!lastReadPathHealthy && ageMs < readPathFailureRetryMs) return false;
+    }
+    try {
+      await verifyReadPath(testClient);
+      recordReadPathHealth(true);
+      return true;
+    } catch {
+      recordReadPathHealth(false);
+      return false;
+    }
   }
 
   function createHealthCheckClient() {
@@ -339,11 +376,13 @@ export function createPrivateRpcSubmitter(
     async isHealthy(): Promise<boolean> {
       if (!effectiveUrl || !privateRpcTrusted) return false;
 
+      // Eagerly create one testClient and share it between read + write probes.
+      // Object construction is cheap (no RPC; HTTP transport is lazy), and the
+      // alternative — creating one per probe phase — would double the
+      // construction cost in the common bootstrap case where both probes run.
       const testClient = createHealthCheckClient();
 
-      try {
-        await verifyReadPath(testClient);
-      } catch {
+      if (!(await ensureReadPathHealthy(testClient))) {
         return false;
       }
 
@@ -370,9 +409,15 @@ export function createPrivateRpcSubmitter(
     async preflightLiveSubmissionReadiness(): Promise<boolean> {
       if (!effectiveUrl || !privateRpcTrusted) return false;
 
+      const testClient = createHealthCheckClient();
       try {
-        const testClient = createHealthCheckClient();
         await verifyReadPath(testClient);
+        recordReadPathHealth(true);
+      } catch {
+        recordReadPathHealth(false);
+        return false;
+      }
+      try {
         await probeWritePath(testClient);
         recordWritePathHealth(true);
         return true;

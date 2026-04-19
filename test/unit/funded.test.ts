@@ -279,7 +279,7 @@ describe("funded strategy", () => {
     expect(result.amountQuoteReceived).toBe(parseEther("1"));
   });
 
-  it("recomputes the execution plan when AJNA balance changes for the same auction", async () => {
+  it("recomputes the execution plan when AJNA balance changes across ticks", async () => {
     const publicClient = {
       chain: BASE_CONFIG.chain,
       readContract: vi.fn()
@@ -305,10 +305,47 @@ describe("funded strategy", () => {
     );
 
     const firstProfit = await strategy.estimateProfit(makeContext());
+    strategy.beginTick?.();
     const secondProfit = await strategy.estimateProfit(makeContext());
 
     expect(secondProfit).toBeGreaterThan(firstProfit);
     expect(publicClient.readContract).toHaveBeenCalledTimes(2);
+  });
+
+  it("reuses the cached AJNA balance across estimate/canExecute calls within a single tick", async () => {
+    const publicClient = {
+      chain: BASE_CONFIG.chain,
+      readContract: vi.fn()
+        .mockResolvedValueOnce(parseEther("100"))
+        .mockResolvedValueOnce(parseEther("100")),
+    };
+    const walletClient = {
+      account: { address: WALLET_ADDRESS },
+    };
+
+    const strategy = createFundedStrategy(
+      publicClient as never,
+      walletClient as never,
+      BASE_CONFIG.ajnaToken,
+      makeSubmitter(),
+      {
+        targetExitPriceUsd: 0.1,
+        autoApprove: false,
+        profitMarginPercent: 5,
+        dryRun: true,
+        nativeTokenPriceUsd: BASE_CONFIG.nativeTokenPriceUsd,
+      },
+    );
+
+    strategy.beginTick?.();
+    await strategy.estimateProfit(makeContext());
+    await strategy.estimateAdditionalExecutionGasUnits?.(makeContext());
+    await strategy.canExecute(makeContext());
+
+    const balanceCalls = publicClient.readContract.mock.calls.filter(
+      ([args]) => args.functionName === "balanceOf",
+    );
+    expect(balanceCalls).toHaveLength(1);
   });
 
   it("execute fails fast when allowance is insufficient and autoApprove is disabled", async () => {

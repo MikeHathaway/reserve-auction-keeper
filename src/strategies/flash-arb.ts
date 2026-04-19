@@ -133,6 +133,31 @@ export function createFlashArbStrategy(
   const warnedKeys = new Set<string>();
   const activeCandidateCache = new WeakMap<AuctionContext, Promise<FlashArbCandidate | null>>();
   const kickCandidateCache = new WeakMap<KickContext, Promise<FlashArbCandidate | null>>();
+  const sourceStateCache = new Map<string, Promise<EvaluatedSource | null>>();
+
+  function sourceCacheKey(source: FlashArbSourceConfig): string {
+    return `${source.protocol}:${source.address.toLowerCase()}`;
+  }
+
+  // Cached promise retains the first caller's `ctx`, so any warnOnce log emitted
+  // while inspecting the source will reference the first pool that triggered the
+  // fetch (deduped per chain+symbol+source key, so cache hits don't double-warn).
+  function inspectSourceCached(
+    ctx: RouteContext,
+    source: FlashArbSourceConfig,
+  ): Promise<EvaluatedSource | null> {
+    const key = sourceCacheKey(source);
+    const cached = sourceStateCache.get(key);
+    if (cached) {
+      return cached;
+    }
+    const pending = inspectSource(ctx, source).catch((error) => {
+      sourceStateCache.delete(key);
+      throw error;
+    });
+    sourceStateCache.set(key, pending);
+    return pending;
+  }
 
   function warnOnce(message: string, key: string, ctx: RouteContext) {
     if (warnedKeys.has(key)) return;
@@ -485,16 +510,11 @@ export function createFlashArbStrategy(
       return null;
     }
 
-    const sourceStateCache = new Map<string, Promise<EvaluatedSource | null>>();
     const swapQuoteCache = new Map<string, Promise<SwapQuoteCacheValue | null>>();
     let bestCandidate: FlashArbCandidate | null = null;
 
     for (const source of symbolRoute.sources) {
-      const sourceCacheKey = `${source.protocol}:${source.address}`;
-      const sourceStatePromise = sourceStateCache.get(sourceCacheKey) ||
-        inspectSource(ctx, source);
-      sourceStateCache.set(sourceCacheKey, sourceStatePromise);
-      const sourceState = await sourceStatePromise;
+      const sourceState = await inspectSourceCached(ctx, source);
       if (!sourceState) continue;
 
       if (sourceState.availableBorrowAjna < borrowAmount) {
@@ -630,7 +650,6 @@ export function createFlashArbStrategy(
       return null;
     }
 
-    const sourceStateCache = new Map<string, Promise<EvaluatedSource | null>>();
     const swapQuoteCache = new Map<string, Promise<SwapQuoteCacheValue | null>>();
     const minimumReachableBorrowAmount = calculateReserveTakeAjnaCost(
       quoteAmount,
@@ -639,11 +658,7 @@ export function createFlashArbStrategy(
     let bestCandidate: FlashArbCandidate | null = null;
 
     for (const source of symbolRoute.sources) {
-      const sourceCacheKey = `${source.protocol}:${source.address}`;
-      const sourceStatePromise = sourceStateCache.get(sourceCacheKey) ||
-        inspectSource(ctx, source);
-      sourceStateCache.set(sourceCacheKey, sourceStatePromise);
-      const sourceState = await sourceStatePromise;
+      const sourceState = await inspectSourceCached(ctx, source);
       if (!sourceState) continue;
 
       if (sourceState.availableBorrowAjna < minimumReachableBorrowAmount) {
@@ -911,6 +926,10 @@ export function createFlashArbStrategy(
 
   return {
     name: "flash-arb",
+
+    beginTick(): void {
+      sourceStateCache.clear();
+    },
 
     async canExecute(ctx: AuctionContext): Promise<boolean> {
       const candidate = await evaluateActiveCandidate(ctx);

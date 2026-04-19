@@ -511,4 +511,80 @@ describe("private-rpc submitter", () => {
     });
     await expect(submitter.isHealthy()).resolves.toBe(false);
   });
+
+  it("skips the read-path probe when the cached result is still healthy", async () => {
+    let nowMs = 0;
+    const getBlockNumber = vi.fn().mockResolvedValue(123n);
+    const request = vi.fn().mockRejectedValue(
+      new Error("failed to decode signed transaction"),
+    );
+    mockCreatePublicClient.mockReturnValue({
+      getBlockNumber,
+      request,
+    });
+
+    const submitter = createPrivateRpcSubmitter(
+      { chain: base } as never,
+      {
+        account: { address: REQUEST.account },
+        sendTransaction: vi.fn(),
+      } as never,
+      "https://private-rpc.example",
+      true,
+      {
+        now: () => nowMs,
+        readPathRevalidationIntervalMs: 60_000,
+        writePathRevalidationIntervalMs: 60_000,
+      },
+    );
+
+    await expect(
+      submitter.preflightLiveSubmissionReadiness?.(),
+    ).resolves.toBe(true);
+    expect(getBlockNumber).toHaveBeenCalledTimes(1);
+
+    nowMs = 5_000;
+
+    await expect(submitter.isHealthy()).resolves.toBe(true);
+    expect(getBlockNumber).toHaveBeenCalledTimes(1);
+
+    nowMs = 70_000;
+
+    await expect(submitter.isHealthy()).resolves.toBe(true);
+    expect(getBlockNumber).toHaveBeenCalledTimes(2);
+  });
+
+  it("preflight records a read-path failure (not write) when verifyReadPath fails", async () => {
+    const getBlockNumber = vi.fn().mockRejectedValue(
+      new Error("read endpoint rejected"),
+    );
+    const request = vi.fn();
+    mockCreatePublicClient.mockReturnValue({
+      getBlockNumber,
+      request,
+    });
+
+    const submitter = createPrivateRpcSubmitter(
+      { chain: base } as never,
+      {
+        account: { address: REQUEST.account },
+        sendTransaction: vi.fn(),
+      } as never,
+      "https://private-rpc.example",
+      true,
+      {
+        readPathRevalidationIntervalMs: 60_000,
+        readPathFailureRetryMs: 60_000,
+      },
+    );
+
+    await expect(
+      submitter.preflightLiveSubmissionReadiness?.(),
+    ).resolves.toBe(false);
+
+    expect(request).not.toHaveBeenCalled();
+
+    await expect(submitter.isHealthy()).resolves.toBe(false);
+    expect(request).not.toHaveBeenCalled();
+  });
 });

@@ -340,6 +340,7 @@ describe("flashbots submitter", () => {
       {
         now: () => nowMs,
         writePathRevalidationIntervalMs: 1,
+        readPathRevalidationIntervalMs: 1,
       },
     );
 
@@ -396,6 +397,8 @@ describe("flashbots submitter", () => {
         now: () => nowMs,
         writePathRevalidationIntervalMs: 1,
         writePathFailureRetryMs: 0,
+        readPathRevalidationIntervalMs: 1,
+        readPathFailureRetryMs: 0,
       },
     );
 
@@ -406,7 +409,277 @@ describe("flashbots submitter", () => {
     nowMs = 10;
     await expect(submitter.isHealthy()).resolves.toBe(false);
     await expect(submitter.isHealthy()).resolves.toBe(true);
-    expect(mockFetch).toHaveBeenCalledTimes(6);
+    expect(mockFetch).toHaveBeenCalledTimes(5);
+  });
+
+  it("skips the simulate probe when the cached read-path result is still healthy", async () => {
+    let nowMs = 0;
+    mockFetch
+      .mockResolvedValueOnce(makeResponse({ result: { results: [{}] } }))
+      .mockResolvedValueOnce(
+        makeResponse({ error: { message: "unable to decode txs" } }),
+      );
+
+    const walletClient = {
+      account: {
+        address: "0x2222222222222222222222222222222222222222",
+        signTransaction: vi.fn().mockResolvedValue(SERIALIZED_TX_1),
+      },
+      prepareTransactionRequest: vi.fn().mockResolvedValue({
+        to: "0x2222222222222222222222222222222222222222",
+        data: "0x",
+        type: "eip1559",
+      }),
+    };
+
+    const submitter = createFlashbotsSubmitter(
+      {
+        chain: mainnet,
+        getBlockNumber: vi.fn().mockResolvedValue(100n),
+      } as never,
+      walletClient as never,
+      AUTH_KEY,
+      {
+        now: () => nowMs,
+        readPathRevalidationIntervalMs: 60_000,
+        writePathRevalidationIntervalMs: 60_000,
+      },
+    );
+
+    await expect(
+      submitter.preflightLiveSubmissionReadiness?.(),
+    ).resolves.toBe(true);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+
+    nowMs = 5_000;
+
+    await expect(submitter.isHealthy()).resolves.toBe(true);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("re-probes the simulate path after the read-path TTL expires", async () => {
+    let nowMs = 0;
+    mockFetch
+      .mockResolvedValueOnce(makeResponse({ result: { results: [{}] } }))
+      .mockResolvedValueOnce(
+        makeResponse({ error: { message: "unable to decode txs" } }),
+      )
+      .mockResolvedValueOnce(makeResponse({ result: { results: [{}] } }))
+      .mockResolvedValueOnce(
+        makeResponse({ error: { message: "unable to decode txs" } }),
+      );
+
+    const walletClient = {
+      account: {
+        address: "0x2222222222222222222222222222222222222222",
+        signTransaction: vi.fn().mockResolvedValue(SERIALIZED_TX_1),
+      },
+      prepareTransactionRequest: vi.fn().mockResolvedValue({
+        to: "0x2222222222222222222222222222222222222222",
+        data: "0x",
+        type: "eip1559",
+      }),
+    };
+
+    const submitter = createFlashbotsSubmitter(
+      {
+        chain: mainnet,
+        getBlockNumber: vi.fn().mockResolvedValue(100n),
+      } as never,
+      walletClient as never,
+      AUTH_KEY,
+      {
+        now: () => nowMs,
+        readPathRevalidationIntervalMs: 1_000,
+        writePathRevalidationIntervalMs: 1_000,
+      },
+    );
+
+    await expect(
+      submitter.preflightLiveSubmissionReadiness?.(),
+    ).resolves.toBe(true);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+
+    nowMs = 2_000;
+
+    await expect(submitter.isHealthy()).resolves.toBe(true);
+    expect(mockFetch).toHaveBeenCalledTimes(4);
+  });
+
+  it("preflight records a read-path failure (not write) when the simulate probe fails", async () => {
+    mockFetch.mockResolvedValueOnce(
+      makeResponse({ error: { message: "relay simulate rejected" } }),
+    );
+
+    const walletClient = {
+      account: {
+        address: "0x2222222222222222222222222222222222222222",
+        signTransaction: vi.fn().mockResolvedValue(SERIALIZED_TX_1),
+      },
+      prepareTransactionRequest: vi.fn().mockResolvedValue({
+        to: "0x2222222222222222222222222222222222222222",
+        data: "0x",
+        type: "eip1559",
+      }),
+    };
+
+    const submitter = createFlashbotsSubmitter(
+      {
+        chain: mainnet,
+        getBlockNumber: vi.fn().mockResolvedValue(100n),
+      } as never,
+      walletClient as never,
+      AUTH_KEY,
+      {
+        readPathRevalidationIntervalMs: 60_000,
+        readPathFailureRetryMs: 60_000,
+      },
+    );
+
+    await expect(
+      submitter.preflightLiveSubmissionReadiness?.(),
+    ).resolves.toBe(false);
+
+    // Read-path failure should be cached (no further probe within retry window),
+    // and the write-path probe must NOT have run.
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+
+    await expect(submitter.isHealthy()).resolves.toBe(false);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("calls publicClient.getBlockNumber exactly once during bootstrap probing", async () => {
+    mockFetch
+      .mockResolvedValueOnce(makeResponse({ result: { results: [{}] } }))
+      .mockResolvedValueOnce(
+        makeResponse({ error: { message: "unable to decode txs" } }),
+      );
+
+    const walletClient = {
+      account: {
+        address: "0x2222222222222222222222222222222222222222",
+        signTransaction: vi.fn().mockResolvedValue(SERIALIZED_TX_1),
+      },
+      prepareTransactionRequest: vi.fn().mockResolvedValue({
+        to: "0x2222222222222222222222222222222222222222",
+        data: "0x",
+        type: "eip1559",
+      }),
+    };
+
+    const getBlockNumber = vi.fn().mockResolvedValue(100n);
+    const submitter = createFlashbotsSubmitter(
+      {
+        chain: mainnet,
+        getBlockNumber,
+      } as never,
+      walletClient as never,
+      AUTH_KEY,
+    );
+
+    await expect(submitter.isHealthy()).resolves.toBe(true);
+    expect(getBlockNumber).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses the fallback getBlockNumber when read-path is cached but write-path needs revalidating", async () => {
+    let nowMs = 0;
+    mockFetch
+      .mockResolvedValueOnce(makeResponse({ result: { results: [{}] } }))
+      .mockResolvedValueOnce(
+        makeResponse({ error: { message: "unable to decode txs" } }),
+      )
+      .mockResolvedValueOnce(
+        makeResponse({ error: { message: "unable to decode txs" } }),
+      );
+
+    const walletClient = {
+      account: {
+        address: "0x2222222222222222222222222222222222222222",
+        signTransaction: vi.fn().mockResolvedValue(SERIALIZED_TX_1),
+      },
+      prepareTransactionRequest: vi.fn().mockResolvedValue({
+        to: "0x2222222222222222222222222222222222222222",
+        data: "0x",
+        type: "eip1559",
+      }),
+    };
+
+    const getBlockNumber = vi.fn().mockResolvedValue(100n);
+    const submitter = createFlashbotsSubmitter(
+      {
+        chain: mainnet,
+        getBlockNumber,
+      } as never,
+      walletClient as never,
+      AUTH_KEY,
+      {
+        now: () => nowMs,
+        readPathRevalidationIntervalMs: 60_000,
+        writePathRevalidationIntervalMs: 1,
+      },
+    );
+
+    await expect(
+      submitter.preflightLiveSubmissionReadiness?.(),
+    ).resolves.toBe(true);
+    expect(getBlockNumber).toHaveBeenCalledTimes(1);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+
+    nowMs = 100;
+
+    await expect(submitter.isHealthy()).resolves.toBe(true);
+
+    // read-path cache hit (no second simulate fetch); write-path revalidates
+    // through the fallback getBlockNumber + sendBundle probe path.
+    expect(getBlockNumber).toHaveBeenCalledTimes(2);
+    expect(mockFetch).toHaveBeenCalledTimes(3);
+
+    const lastCallBody = JSON.parse(mockFetch.mock.calls[2][1].body as string);
+    expect(lastCallBody.method).toBe("eth_sendBundle");
+  });
+
+  it("does not poison relay read-path cache when the upstream RPC getBlockNumber fails", async () => {
+    const walletClient = {
+      account: {
+        address: "0x2222222222222222222222222222222222222222",
+        signTransaction: vi.fn().mockResolvedValue(SERIALIZED_TX_1),
+      },
+      prepareTransactionRequest: vi.fn().mockResolvedValue({
+        to: "0x2222222222222222222222222222222222222222",
+        data: "0x",
+        type: "eip1559",
+      }),
+    };
+
+    const getBlockNumber = vi.fn()
+      .mockRejectedValueOnce(new Error("upstream RPC unavailable"))
+      .mockResolvedValue(100n);
+    const submitter = createFlashbotsSubmitter(
+      {
+        chain: mainnet,
+        getBlockNumber,
+      } as never,
+      walletClient as never,
+      AUTH_KEY,
+      {
+        readPathFailureRetryMs: 60_000,
+      },
+    );
+
+    // Upstream failure: isHealthy returns false but the relay was never probed,
+    // so the relay-side cache must NOT be marked unhealthy.
+    await expect(submitter.isHealthy()).resolves.toBe(false);
+    expect(mockFetch).not.toHaveBeenCalled();
+
+    // Once upstream recovers, isHealthy probes for real (cache wasn't poisoned).
+    mockFetch
+      .mockResolvedValueOnce(makeResponse({ result: { results: [{}] } }))
+      .mockResolvedValueOnce(
+        makeResponse({ error: { message: "unable to decode txs" } }),
+      );
+
+    await expect(submitter.isHealthy()).resolves.toBe(true);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
   });
 
   it("marks the write path unhealthy immediately after a live sendBundle failure", async () => {

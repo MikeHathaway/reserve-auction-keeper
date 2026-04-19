@@ -858,6 +858,8 @@ async function runChainLoop(keeper: ChainKeeper, config: AppConfig): Promise<voi
         });
       }
 
+      strategy.beginTick?.();
+
       // 1. Get reserve states for all pools
       const poolStates = await getPoolReserveStates(
         publicClient,

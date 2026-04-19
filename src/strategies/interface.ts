@@ -38,6 +38,13 @@ export interface TxResult {
 export interface ExecutionStrategy {
   readonly name: string;
 
+  /**
+   * Optional hook the keeper invokes at the start of each loop iteration so
+   * strategies can clear per-tick caches (wallet balance, etc.) before any
+   * auction or kick evaluation runs.
+   */
+  beginTick?(): void;
+
   /** Check if this strategy can and should execute on the given auction. */
   canExecute(ctx: AuctionContext): Promise<boolean>;
 
