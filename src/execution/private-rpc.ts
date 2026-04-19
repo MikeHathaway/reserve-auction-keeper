@@ -9,7 +9,7 @@ import {
 } from "viem";
 import type { MevSubmitter, SubmitRequest } from "./mev-submitter.js";
 import { logger, redactUrlForLogs } from "../utils/logger.js";
-import { isTransientRpcError, retryAsync } from "../utils/retry.js";
+import { getErrorMessage, isTransientRpcError, retryAsync } from "../utils/retry.js";
 import { getEip1559FeeCapOverrides } from "./gas.js";
 import { createPendingSubmissionError } from "./receipt.js";
 
@@ -157,7 +157,10 @@ export function createPrivateRpcSubmitter(
       await verifyReadPath(testClient);
       recordReadPathHealth(true);
       return true;
-    } catch {
+    } catch (error) {
+      logger.debug("Private RPC health check aborted: read-path probe failed", {
+        error: getErrorMessage(error),
+      });
       recordReadPathHealth(false);
       return false;
     }
@@ -413,7 +416,10 @@ export function createPrivateRpcSubmitter(
       try {
         await verifyReadPath(testClient);
         recordReadPathHealth(true);
-      } catch {
+      } catch (error) {
+        logger.debug("Private RPC preflight aborted: read-path probe failed", {
+          error: getErrorMessage(error),
+        });
         recordReadPathHealth(false);
         return false;
       }
@@ -421,7 +427,10 @@ export function createPrivateRpcSubmitter(
         await probeWritePath(testClient);
         recordWritePathHealth(true);
         return true;
-      } catch {
+      } catch (error) {
+        logger.debug("Private RPC preflight aborted: write-path probe failed", {
+          error: getErrorMessage(error),
+        });
         recordWritePathHealth(false);
         return false;
       }

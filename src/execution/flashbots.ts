@@ -263,7 +263,7 @@ export function createFlashbotsSubmitter(
       const latestBlock = await publicClient.getBlockNumber();
       targetBlock = latestBlock + 1n;
     } catch (error) {
-      logger.debug("Flashbots health check skipped: upstream RPC getBlockNumber failed", {
+      logger.debug("Flashbots health check aborted: upstream RPC getBlockNumber failed", {
         error: getErrorMessage(error),
       });
       return { healthy: false, targetBlock: null };
@@ -273,7 +273,10 @@ export function createFlashbotsSubmitter(
       await simulateExecutionPath(targetBlock);
       recordReadPathHealth(true);
       return { healthy: true, targetBlock };
-    } catch {
+    } catch (error) {
+      logger.debug("Flashbots health check aborted: simulate probe failed", {
+        error: getErrorMessage(error),
+      });
       recordReadPathHealth(false);
       return { healthy: false, targetBlock: null };
     }
@@ -520,7 +523,7 @@ export function createFlashbotsSubmitter(
           targetBlock = latestBlock + 1n;
         } catch (error) {
           // Upstream RPC failure — don't poison relay-side write-path cache.
-          logger.debug("Flashbots write-path revalidation skipped: upstream RPC getBlockNumber failed", {
+          logger.debug("Flashbots write-path revalidation aborted: upstream RPC getBlockNumber failed", {
             error: getErrorMessage(error),
           });
           return false;
@@ -535,7 +538,7 @@ export function createFlashbotsSubmitter(
         const latestBlock = await publicClient.getBlockNumber();
         targetBlock = latestBlock + 1n;
       } catch (error) {
-        logger.debug("Flashbots preflight skipped: upstream RPC getBlockNumber failed", {
+        logger.debug("Flashbots preflight aborted: upstream RPC getBlockNumber failed", {
           error: getErrorMessage(error),
         });
         return false;
@@ -543,7 +546,10 @@ export function createFlashbotsSubmitter(
       try {
         await simulateExecutionPath(targetBlock);
         recordReadPathHealth(true);
-      } catch {
+      } catch (error) {
+        logger.debug("Flashbots preflight aborted: simulate probe failed", {
+          error: getErrorMessage(error),
+        });
         recordReadPathHealth(false);
         return false;
       }
@@ -551,7 +557,10 @@ export function createFlashbotsSubmitter(
         await probeSendBundlePath(targetBlock);
         recordWritePathHealth(true);
         return true;
-      } catch {
+      } catch (error) {
+        logger.debug("Flashbots preflight aborted: sendBundle probe failed", {
+          error: getErrorMessage(error),
+        });
         recordWritePathHealth(false);
         return false;
       }

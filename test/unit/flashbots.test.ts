@@ -625,6 +625,7 @@ describe("flashbots submitter", () => {
     expect(getBlockNumber).toHaveBeenCalledTimes(1);
     expect(mockFetch).toHaveBeenCalledTimes(2);
 
+    // Past write-path TTL (1ms), still inside read-path TTL (60s).
     nowMs = 100;
 
     await expect(submitter.isHealthy()).resolves.toBe(true);
