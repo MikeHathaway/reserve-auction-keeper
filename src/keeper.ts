@@ -188,6 +188,11 @@ async function preflightLiveSubmitters(
   config: AppConfig,
 ): Promise<void> {
   await Promise.all(keepers.map(async (keeper) => {
+    if (config.dryRun) {
+      await refreshSubmitterHealth(keeper, config);
+      return;
+    }
+
     const isReady = keeper.submitter.preflightLiveSubmissionReadiness
       ? await keeper.submitter.preflightLiveSubmissionReadiness()
       : await refreshSubmitterHealth(keeper, config);
