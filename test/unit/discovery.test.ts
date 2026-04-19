@@ -7,6 +7,7 @@ import { parseEther } from "viem";
 import {
   discoverPools,
   getPoolReserveStates,
+  type PoolMetadata,
 } from "../../src/auction/discovery.js";
 import { BASE_CONFIG } from "../../src/chains/index.js";
 
@@ -30,6 +31,9 @@ const POOL_B = "0x2222222222222222222222222222222222222222";
 const POOL_C = "0x3333333333333333333333333333333333333333";
 const POOL_D = "0x4444444444444444444444444444444444444444";
 
+const USDC_SCALE = 1_000_000_000_000n;
+const WETH_SCALE = 1n;
+
 describe("discovery", () => {
   let cacheDir: string;
 
@@ -43,9 +47,17 @@ describe("discovery", () => {
     vi.restoreAllMocks();
   });
 
-  it("returns configured pools without hitting RPC discovery", async () => {
+  it("fetches metadata for configured pools", async () => {
     const client = {
-      multicall: vi.fn(),
+      multicall: vi.fn()
+        .mockResolvedValueOnce([
+          { status: "success", result: BASE_CONFIG.quoteTokens.USDC },
+          { status: "success", result: BASE_CONFIG.quoteTokens.WETH },
+        ])
+        .mockResolvedValueOnce([
+          { status: "success", result: USDC_SCALE },
+          { status: "success", result: WETH_SCALE },
+        ]),
     };
 
     const pools = await discoverPools(
@@ -54,8 +66,21 @@ describe("discovery", () => {
       [POOL_A, POOL_B],
     );
 
-    expect(pools).toEqual([POOL_A, POOL_B]);
-    expect(client.multicall).not.toHaveBeenCalled();
+    expect(pools).toEqual([
+      {
+        pool: POOL_A,
+        quoteToken: BASE_CONFIG.quoteTokens.USDC,
+        quoteTokenScale: USDC_SCALE,
+        quoteTokenSymbol: "USDC",
+      },
+      {
+        pool: POOL_B,
+        quoteToken: BASE_CONFIG.quoteTokens.WETH,
+        quoteTokenScale: WETH_SCALE,
+        quoteTokenSymbol: "WETH",
+      },
+    ]);
+    expect(client.multicall).toHaveBeenCalledTimes(2);
   });
 
   it("persists a full discovery snapshot on cold start", async () => {
@@ -72,6 +97,11 @@ describe("discovery", () => {
           { status: "success", result: BASE_CONFIG.quoteTokens.USDC },
           { status: "success", result: "0x9999999999999999999999999999999999999999" },
           { status: "success", result: BASE_CONFIG.quoteTokens.WETH },
+        ])
+        .mockResolvedValueOnce([
+          { status: "success", result: USDC_SCALE },
+          { status: "success", result: 0n },
+          { status: "success", result: WETH_SCALE },
         ]),
       getBlockNumber: vi.fn().mockResolvedValue(123n),
     };
@@ -83,19 +113,45 @@ describe("discovery", () => {
       cacheDir,
     );
 
-    expect(pools).toEqual([POOL_A, POOL_C]);
-    expect(client.multicall).toHaveBeenCalledTimes(2);
+    expect(pools).toEqual([
+      {
+        pool: POOL_A,
+        quoteToken: BASE_CONFIG.quoteTokens.USDC,
+        quoteTokenScale: USDC_SCALE,
+        quoteTokenSymbol: "USDC",
+      },
+      {
+        pool: POOL_C,
+        quoteToken: BASE_CONFIG.quoteTokens.WETH,
+        quoteTokenScale: WETH_SCALE,
+        quoteTokenSymbol: "WETH",
+      },
+    ]);
+    expect(client.multicall).toHaveBeenCalledTimes(3);
 
     const snapshot = JSON.parse(
       await readFile(join(cacheDir, `${BASE_CONFIG.name}.json`), "utf8"),
     ) as {
+      version: number;
       lastPoolCount: string;
-      pools: string[];
+      pools: Array<{ address: string; quoteToken: string; quoteTokenScale: string }>;
       updatedAtBlock: string;
     };
 
+    expect(snapshot.version).toBe(2);
     expect(snapshot.lastPoolCount).toBe("3");
-    expect(snapshot.pools).toEqual([POOL_A, POOL_C]);
+    expect(snapshot.pools).toEqual([
+      {
+        address: POOL_A,
+        quoteToken: BASE_CONFIG.quoteTokens.USDC,
+        quoteTokenScale: USDC_SCALE.toString(),
+      },
+      {
+        address: POOL_C,
+        quoteToken: BASE_CONFIG.quoteTokens.WETH,
+        quoteTokenScale: WETH_SCALE.toString(),
+      },
+    ]);
     expect(snapshot.updatedAtBlock).toBe("123");
   });
 
@@ -103,14 +159,25 @@ describe("discovery", () => {
     await writeFile(
       join(cacheDir, `${BASE_CONFIG.name}.json`),
       JSON.stringify({
-        version: 1,
+        version: 2,
         chain: BASE_CONFIG.name,
         factory: BASE_CONFIG.poolFactory,
         quoteTokens: Object.values(BASE_CONFIG.quoteTokens).map((address) =>
           address.toLowerCase()
         ).sort(),
         lastPoolCount: "2",
-        pools: [POOL_A, POOL_B],
+        pools: [
+          {
+            address: POOL_A,
+            quoteToken: BASE_CONFIG.quoteTokens.USDC,
+            quoteTokenScale: USDC_SCALE.toString(),
+          },
+          {
+            address: POOL_B,
+            quoteToken: BASE_CONFIG.quoteTokens.WETH,
+            quoteTokenScale: WETH_SCALE.toString(),
+          },
+        ],
         updatedAtBlock: "100",
       }),
     );
@@ -128,7 +195,20 @@ describe("discovery", () => {
       cacheDir,
     );
 
-    expect(pools).toEqual([POOL_A, POOL_B]);
+    expect(pools).toEqual([
+      {
+        pool: POOL_A,
+        quoteToken: BASE_CONFIG.quoteTokens.USDC,
+        quoteTokenScale: USDC_SCALE,
+        quoteTokenSymbol: "USDC",
+      },
+      {
+        pool: POOL_B,
+        quoteToken: BASE_CONFIG.quoteTokens.WETH,
+        quoteTokenScale: WETH_SCALE,
+        quoteTokenSymbol: "WETH",
+      },
+    ]);
     expect(client.multicall).not.toHaveBeenCalled();
     expect(client.getBlockNumber).not.toHaveBeenCalled();
   });
@@ -137,14 +217,20 @@ describe("discovery", () => {
     await writeFile(
       join(cacheDir, `${BASE_CONFIG.name}.json`),
       JSON.stringify({
-        version: 1,
+        version: 2,
         chain: BASE_CONFIG.name,
         factory: BASE_CONFIG.poolFactory,
         quoteTokens: Object.values(BASE_CONFIG.quoteTokens).map((address) =>
           address.toLowerCase()
         ).sort(),
         lastPoolCount: "2",
-        pools: [POOL_A],
+        pools: [
+          {
+            address: POOL_A,
+            quoteToken: BASE_CONFIG.quoteTokens.USDC,
+            quoteTokenScale: USDC_SCALE.toString(),
+          },
+        ],
         updatedAtBlock: "100",
       }),
     );
@@ -159,6 +245,10 @@ describe("discovery", () => {
         .mockResolvedValueOnce([
           { status: "success", result: BASE_CONFIG.quoteTokens.USDC },
           { status: "success", result: "0x9999999999999999999999999999999999999999" },
+        ])
+        .mockResolvedValueOnce([
+          { status: "success", result: USDC_SCALE },
+          { status: "success", result: 0n },
         ]),
       getBlockNumber: vi.fn().mockResolvedValue(200n),
     };
@@ -170,7 +260,7 @@ describe("discovery", () => {
       cacheDir,
     );
 
-    expect(pools).toEqual([POOL_A, POOL_C]);
+    expect(pools.map((p) => p.pool)).toEqual([POOL_A, POOL_C]);
     expect(client.multicall).toHaveBeenNthCalledWith(1, {
       contracts: [
         {
@@ -200,6 +290,9 @@ describe("discovery", () => {
         ])
         .mockResolvedValueOnce([
           { status: "success", result: BASE_CONFIG.quoteTokens.USDC },
+        ])
+        .mockResolvedValueOnce([
+          { status: "success", result: USDC_SCALE },
         ]),
       getBlockNumber: vi.fn().mockResolvedValue(300n),
     };
@@ -211,8 +304,50 @@ describe("discovery", () => {
       cacheDir,
     );
 
-    expect(pools).toEqual([POOL_A]);
-    expect(client.multicall).toHaveBeenCalledTimes(2);
+    expect(pools.map((p) => p.pool)).toEqual([POOL_A]);
+    expect(client.multicall).toHaveBeenCalledTimes(3);
+  });
+
+  it("rebuilds when cache version differs", async () => {
+    await writeFile(
+      join(cacheDir, `${BASE_CONFIG.name}.json`),
+      JSON.stringify({
+        version: 1,
+        chain: BASE_CONFIG.name,
+        factory: BASE_CONFIG.poolFactory,
+        quoteTokens: Object.values(BASE_CONFIG.quoteTokens).map((address) =>
+          address.toLowerCase()
+        ).sort(),
+        lastPoolCount: "1",
+        pools: [POOL_A],
+        updatedAtBlock: "100",
+      }),
+    );
+    mockGetNumberOfDeployedPools.mockResolvedValue(1n);
+
+    const client = {
+      multicall: vi.fn()
+        .mockResolvedValueOnce([
+          { status: "success", result: POOL_A },
+        ])
+        .mockResolvedValueOnce([
+          { status: "success", result: BASE_CONFIG.quoteTokens.USDC },
+        ])
+        .mockResolvedValueOnce([
+          { status: "success", result: USDC_SCALE },
+        ]),
+      getBlockNumber: vi.fn().mockResolvedValue(400n),
+    };
+
+    const pools = await discoverPools(
+      client as never,
+      BASE_CONFIG,
+      undefined,
+      cacheDir,
+    );
+
+    expect(pools.map((p) => p.pool)).toEqual([POOL_A]);
+    expect(client.multicall).toHaveBeenCalledTimes(3);
   });
 
   it("classifies active auctions and kickable pools from reserve state", async () => {
@@ -239,39 +374,47 @@ describe("discovery", () => {
               0n,
             ],
           },
-        ])
-        .mockResolvedValueOnce([
-          { status: "success", result: BASE_CONFIG.quoteTokens.USDC },
-          { status: "success", result: BASE_CONFIG.quoteTokens.WETH },
-        ])
-        .mockResolvedValueOnce([
-          { status: "success", result: 1_000_000_000_000n },
-          { status: "success", result: 1n },
         ]),
     };
+
+    const metadata: PoolMetadata[] = [
+      {
+        pool: POOL_A,
+        quoteToken: BASE_CONFIG.quoteTokens.USDC,
+        quoteTokenScale: USDC_SCALE,
+        quoteTokenSymbol: "USDC",
+      },
+      {
+        pool: POOL_B,
+        quoteToken: BASE_CONFIG.quoteTokens.WETH,
+        quoteTokenScale: WETH_SCALE,
+        quoteTokenSymbol: "WETH",
+      },
+    ];
 
     const states = await getPoolReserveStates(
       client as never,
       BASE_CONFIG,
-      [POOL_A, POOL_B],
+      metadata,
     );
 
     expect(states).toHaveLength(2);
     expect(states[0]).toMatchObject({
       pool: POOL_A,
-      quoteTokenScale: 1_000_000_000_000n,
+      quoteTokenScale: USDC_SCALE,
       quoteTokenSymbol: "USDC",
       hasActiveAuction: true,
       isKickable: false,
     });
     expect(states[1]).toMatchObject({
       pool: POOL_B,
-      quoteTokenScale: 1n,
+      quoteTokenScale: WETH_SCALE,
       quoteTokenSymbol: "WETH",
       hasActiveAuction: false,
       isKickable: true,
     });
-    expect(client.multicall).toHaveBeenNthCalledWith(1, {
+    expect(client.multicall).toHaveBeenCalledTimes(1);
+    expect(client.multicall).toHaveBeenCalledWith({
       contracts: [
         {
           address: BASE_CONFIG.poolInfoUtils,
@@ -287,28 +430,12 @@ describe("discovery", () => {
         },
       ],
     });
-    expect(client.multicall).toHaveBeenNthCalledWith(3, {
-      contracts: [
-        {
-          address: POOL_A,
-          abi: expect.any(Array),
-          functionName: "quoteTokenScale",
-        },
-        {
-          address: POOL_B,
-          abi: expect.any(Array),
-          functionName: "quoteTokenScale",
-        },
-      ],
-    });
   });
 
   it("retries reserve-state reads when RPC calls fail transiently", async () => {
     const client = {
       multicall: vi.fn()
         .mockRejectedValueOnce(new Error("rpc timeout"))
-        .mockResolvedValueOnce([])
-        .mockResolvedValueOnce([])
         .mockResolvedValueOnce([
           {
             status: "success",
@@ -320,22 +447,25 @@ describe("discovery", () => {
               3600n,
             ],
           },
-        ])
-        .mockResolvedValueOnce([
-          { status: "success", result: BASE_CONFIG.quoteTokens.USDC },
-        ])
-        .mockResolvedValueOnce([
-          { status: "success", result: 1_000_000_000_000n },
         ]),
     };
+
+    const metadata: PoolMetadata[] = [
+      {
+        pool: POOL_A,
+        quoteToken: BASE_CONFIG.quoteTokens.USDC,
+        quoteTokenScale: USDC_SCALE,
+        quoteTokenSymbol: "USDC",
+      },
+    ];
 
     const states = await getPoolReserveStates(
       client as never,
       BASE_CONFIG,
-      [POOL_A],
+      metadata,
     );
 
     expect(states).toHaveLength(1);
-    expect(client.multicall).toHaveBeenCalledTimes(6);
+    expect(client.multicall).toHaveBeenCalledTimes(2);
   });
 });

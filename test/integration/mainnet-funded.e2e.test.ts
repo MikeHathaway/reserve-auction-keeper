@@ -261,7 +261,7 @@ describeMainnetFork("mainnet funded strategy e2e", () => {
     await rpcRequest(rpcUrl, "anvil_stopImpersonatingAccount", [AJNA_WETH_UNISWAP_POOL]);
 
     const pools = await discoverPools(publicClient, MAINNET_CONFIG, [TARGET_POOL]);
-    expect(pools).toEqual([TARGET_POOL]);
+    expect(pools.map((p) => p.pool)).toEqual([TARGET_POOL]);
     await expect(canKickReserveAuction(publicClient, TARGET_POOL)).resolves.toBe(true);
 
     const kickHash = await walletClient.writeContract({
@@ -287,7 +287,11 @@ describeMainnetFork("mainnet funded strategy e2e", () => {
     expect(poolState.isKickable).toBe(false);
     expect(poolState.claimableReservesRemaining).toBeGreaterThan(0n);
 
-    const priceMap = await getAuctionPrices(publicClient, MAINNET_CONFIG, pools);
+    const priceMap = await getAuctionPrices(
+      publicClient,
+      MAINNET_CONFIG,
+      pools.map((p) => p.pool),
+    );
     const priceInfo = priceMap.get(TARGET_POOL);
     expect(priceInfo).toBeDefined();
 
