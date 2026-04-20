@@ -261,7 +261,7 @@ contract FlashArbExecutorTest is TestBase {
             profitRecipient: profitRecipient
         });
 
-        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutor.InvalidFlashPool.selector));
+        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutor.UnauthorizedCallback.selector));
         executor.uniswapV3FlashCallback(0, 0, abi.encode(params));
     }
 

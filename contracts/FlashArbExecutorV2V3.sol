@@ -17,6 +17,12 @@ interface IUniswapV2PairLike {
     function swap(uint256 amount0Out, uint256 amount1Out, address to, bytes calldata data) external;
 }
 
+/// @title FlashArbExecutorV2V3
+/// @notice Executor for Ajna reserve-auction flash-arb with a Uniswap V2 flash source
+/// and a Uniswap V3 swap back to AJNA. Operator-only; holds no persistent funds.
+/// @dev Authentication in the V2 callback: (1) msg.sender is a canonical factory pair,
+/// (2) msg.sender equals `activeFlashPair`, (3) `sender == address(this)` (V2 passes
+/// the swap() caller), (4) keccak256(data) equals `activeCallbackHash`.
 contract FlashArbExecutorV2V3 is IUniswapV2Callee {
     error Unauthorized();
     error UnauthorizedCallback();
@@ -31,6 +37,11 @@ contract FlashArbExecutorV2V3 is IUniswapV2Callee {
     error InvalidSwapPath();
     error UnsupportedBorrowToken();
     error InsufficientRepayment();
+
+    // Uniswap V2 swap-fee constants. The protocol takes a 0.30% fee on every swap,
+    // so a flash-loan of `x` AJNA must be repaid with `ceil(x * 1000 / 997)`.
+    uint256 private constant UNISWAP_V2_FEE_DENOMINATOR = 1000;
+    uint256 private constant UNISWAP_V2_FEE_NUMERATOR = 997; // denominator - 3 (for 0.30% fee)
 
     struct ExecuteParams {
         address flashPair;
@@ -49,6 +60,10 @@ contract FlashArbExecutorV2V3 is IUniswapV2Callee {
 
     address private activeFlashPair;
     bytes32 private activeCallbackHash;
+    uint256 private preFlashAjnaBalance;
+    // Load-bearing for TWO invariants: (1) `nonReentrant` modifier guard,
+    // (2) `_isFlashActive()` gate that blocks `recoverToken` during execution.
+    // Any refactor that changes this variable's lifecycle must preserve both.
     bool private flashExecutionActive;
 
     event FlashArbExecuted(
@@ -66,6 +81,16 @@ contract FlashArbExecutorV2V3 is IUniswapV2Callee {
         _;
     }
 
+    /// @dev Reuses `flashExecutionActive` as a reentrancy guard. Prevents the owner
+    /// (or any contract the owner routes through) from invoking `executeFlashArb`
+    /// recursively while a flash is in progress.
+    modifier nonReentrant() {
+        if (flashExecutionActive) revert ActiveFlashExecution();
+        flashExecutionActive = true;
+        _;
+        flashExecutionActive = false;
+    }
+
     constructor(
         address ajnaToken_,
         address swapRouter_,
@@ -81,7 +106,11 @@ contract FlashArbExecutorV2V3 is IUniswapV2Callee {
         owner = msg.sender;
     }
 
-    function executeFlashArb(ExecuteParams calldata params) external onlyOwner {
+    /// @notice Initiate a V2-flash → Ajna takeReserves → V3-swap → repay+profit cycle.
+    /// @dev Must be called by the operator. Pins the caller-intended `flashPair` and
+    /// the full param hash to storage; V2 pair invokes `uniswapV2Call` on us.
+    /// @param params Flash source, Ajna pool, sizing, swap path, and profit recipient.
+    function executeFlashArb(ExecuteParams calldata params) external onlyOwner nonReentrant {
         _validateParams(params);
         (bool ok, address token0, address token1) = _readPairIdentity(params.flashPair);
         if (!ok) revert InvalidFlashPair();
@@ -98,34 +127,40 @@ contract FlashArbExecutorV2V3 is IUniswapV2Callee {
 
         activeFlashPair = params.flashPair;
         activeCallbackHash = keccak256(abi.encode(params));
-        flashExecutionActive = true;
+        preFlashAjnaBalance = IERC20Like(ajnaToken).balanceOf(address(this));
         IUniswapV2PairLike(params.flashPair).swap(amount0Out, amount1Out, address(this), abi.encode(params));
         activeFlashPair = address(0);
         activeCallbackHash = bytes32(0);
-        flashExecutionActive = false;
+        preFlashAjnaBalance = 0;
     }
 
+    /// @notice Uniswap V2 flash callback. Authenticates: `sender == address(this)`
+    /// (V2 guarantees this is the caller of `swap`), `msg.sender == activeFlashPair`,
+    /// and `keccak256(data) == activeCallbackHash`. Together these preclude both
+    /// opportunistic callers and counterfeit pair contracts.
     function uniswapV2Call(
         address sender,
-        uint256 amount0,
-        uint256 amount1,
+        uint256 /* amount0 */,
+        uint256 /* amount1 */,
         bytes calldata data
     ) external override {
-        ExecuteParams memory params = abi.decode(data, (ExecuteParams));
-        if (msg.sender != params.flashPair) revert InvalidFlashPair();
         if (sender != address(this)) revert UnauthorizedCallback();
         if (msg.sender != activeFlashPair || keccak256(data) != activeCallbackHash) {
             revert UnauthorizedCallback();
         }
+        ExecuteParams memory params = abi.decode(data, (ExecuteParams));
         activeFlashPair = address(0);
         activeCallbackHash = bytes32(0);
 
-        uint256 borrowedAmount = amount0 > 0 ? amount0 : amount1;
+        // Verify the flash pair actually delivered at least `borrowAmount` AJNA —
+        // compare current balance to the pinned pre-flash balance. This does NOT
+        // trust the callback-reported amounts (which are the pair's self-reported
+        // amountOut values and can be inflated by a malicious or buggy pair).
+        uint256 preExistingAjnaBalance = preFlashAjnaBalance;
         uint256 startingAjnaBalance = IERC20Like(ajnaToken).balanceOf(address(this));
-        if (startingAjnaBalance < borrowedAmount || borrowedAmount < params.borrowAmount) {
+        if (startingAjnaBalance - preExistingAjnaBalance < params.borrowAmount) {
             revert InvalidBorrowBalance();
         }
-        uint256 preExistingAjnaBalance = startingAjnaBalance - borrowedAmount;
         uint256 repayAmount = _calculateRepayAmount(params.borrowAmount);
 
         _approveExact(ajnaToken, params.ajnaPool, params.borrowAmount);
@@ -155,6 +190,8 @@ contract FlashArbExecutorV2V3 is IUniswapV2Callee {
 
         _approveExact(quoteToken, swapRouter, quoteTokenAmount);
 
+        // deadline: block.timestamp — the entire flash-arb is atomic within this
+        // transaction, so there is no staleness window for a deadline to guard against.
         uint256 amountOut = ISwapRouterLike(swapRouter).exactInput(
             ISwapRouterLike.ExactInputParams({
                 path: params.swapPath,
@@ -183,6 +220,9 @@ contract FlashArbExecutorV2V3 is IUniswapV2Callee {
         );
     }
 
+    /// @notice Sweep any token held by this contract to a recipient. Intended for
+    /// recovering dust, blacklisted tokens, or funds stuck after a partial-fill
+    /// edge case. Blocked during an active flash execution.
     function recoverToken(address token, address to, uint256 amount) external onlyOwner {
         if (_isFlashActive()) revert ActiveFlashExecution();
         if (token == address(0) || to == address(0)) revert InvalidAddress();
@@ -229,12 +269,28 @@ contract FlashArbExecutorV2V3 is IUniswapV2Callee {
     }
 
     function _approveExact(address token, address spender, uint256 amount) internal {
-        if (!IERC20Like(token).approve(spender, 0)) revert InvalidAddress();
-        if (!IERC20Like(token).approve(spender, amount)) revert InvalidAddress();
+        _safeTokenCall(token, abi.encodeWithSelector(IERC20Like.approve.selector, spender, uint256(0)));
+        _safeTokenCall(token, abi.encodeWithSelector(IERC20Like.approve.selector, spender, amount));
     }
 
     function _transferToken(address token, address to, uint256 amount) internal {
-        if (!IERC20Like(token).transfer(to, amount)) revert InvalidAddress();
+        _safeTokenCall(token, abi.encodeWithSelector(IERC20Like.transfer.selector, to, amount));
+    }
+
+    // Safe ERC20 call: accepts both standard (returns bool) and non-standard
+    // (returns nothing, e.g. USDT) tokens. Revert reasons from the token are
+    // preserved via assembly-level bubble-up; otherwise reverts InvalidAddress.
+    function _safeTokenCall(address token, bytes memory data) private {
+        (bool success, bytes memory returnData) = token.call(data);
+        if (!success) {
+            if (returnData.length > 0) {
+                assembly {
+                    revert(add(returnData, 32), mload(returnData))
+                }
+            }
+            revert InvalidAddress();
+        }
+        if (returnData.length > 0 && !abi.decode(returnData, (bool))) revert InvalidAddress();
     }
 
     function _validateParams(ExecuteParams calldata params) internal pure {
@@ -251,8 +307,12 @@ contract FlashArbExecutorV2V3 is IUniswapV2Callee {
         ) revert InvalidParams();
     }
 
+    /// @dev ceil(borrowAmount * 1000 / 997) — the exact amount of AJNA we must
+    /// return to the pair to keep the V2 constant-product invariant intact after
+    /// the 0.30% swap fee is applied to our flash borrow.
     function _calculateRepayAmount(uint256 borrowAmount) internal pure returns (uint256) {
-        return (borrowAmount * 1000 + 996) / 997;
+        return (borrowAmount * UNISWAP_V2_FEE_DENOMINATOR + UNISWAP_V2_FEE_NUMERATOR - 1)
+            / UNISWAP_V2_FEE_NUMERATOR;
     }
 
     function _isFlashActive() internal view returns (bool) {
