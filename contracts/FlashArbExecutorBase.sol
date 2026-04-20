@@ -37,6 +37,19 @@ interface ISwapRouterLike {
     function exactInput(ExactInputParams calldata params) external payable returns (uint256 amountOut);
 }
 
+// Uniswap V3 encoded-path layout. A swap path is a byte string of the form
+//   [token0][fee0][token1][fee1]...[tokenN]
+// where each address is 20 bytes and each fee tier is 3 bytes (uint24).
+// Used by executors that parse the V3 swap-path format (V3V3, V2V3).
+uint256 constant PATH_ADDRESS_BYTES = 20;
+uint256 constant PATH_FEE_BYTES = 3;
+uint256 constant PATH_HOP_BYTES = 23; // PATH_ADDRESS_BYTES + PATH_FEE_BYTES
+uint256 constant PATH_MIN_BYTES = 43; // first address + one hop = 20 + 23
+// Right-shift amounts for extracting packed values from a 32-byte word loaded
+// via `mload`. Derived as `256 - N_BYTES * 8`.
+uint256 constant PATH_ADDRESS_SHIFT = 96; // 256 - PATH_ADDRESS_BYTES * 8
+uint256 constant PATH_FEE_SHIFT = 232; // 256 - PATH_FEE_BYTES * 8
+
 /// @title FlashArbExecutorBase
 /// @notice Shared state, helpers, and invariants for the Ajna reserve-auction
 /// flash-arb executor family (V3V3, V2V3, V3V2). Each concrete executor inherits
@@ -126,17 +139,30 @@ abstract contract FlashArbExecutorBase {
         _safeTokenCall(token, abi.encodeWithSelector(IERC20Like.approve.selector, spender, amount));
     }
 
+    /// @dev Reset an ERC20 allowance to zero. Concrete executors MUST call this
+    /// after any external call that consumed an allowance (takeReserves, swap)
+    /// so that residual allowance cannot be exploited by a malicious or later-
+    /// compromised spender to drain pre-existing token balance via transferFrom.
+    function _revokeApproval(address token, address spender) internal {
+        _safeTokenCall(token, abi.encodeWithSelector(IERC20Like.approve.selector, spender, uint256(0)));
+    }
+
     function _transferToken(address token, address to, uint256 amount) internal {
         _safeTokenCall(token, abi.encodeWithSelector(IERC20Like.transfer.selector, to, amount));
     }
 
     // Safe ERC20 call: accepts both standard (returns bool) and non-standard
     // (returns nothing, e.g. USDT) tokens. Token revert reasons are preserved
-    // via assembly-level bubble-up. Three failure cases:
-    //   (1) call reverted with a reason → bubble up that reason,
-    //   (2) call reverted without a reason → revert InvalidAddress,
-    //   (3) call succeeded but returned `false` → revert InvalidAddress.
+    // via assembly-level bubble-up. Four failure cases:
+    //   (1) target is an EOA or has no deployed code → revert InvalidAddress,
+    //   (2) call reverted with a reason → bubble up that reason,
+    //   (3) call reverted without a reason → revert InvalidAddress,
+    //   (4) call succeeded but returned `false` → revert InvalidAddress.
+    // The code-length check closes a footgun where `call` to an EOA succeeds
+    // with empty return data, which would otherwise be indistinguishable from
+    // a legitimate non-standard-token success.
     function _safeTokenCall(address token, bytes memory data) private {
+        if (token.code.length == 0) revert InvalidAddress();
         (bool success, bytes memory returnData) = token.call(data);
         if (!success) {
             if (returnData.length > 0) {

@@ -7,7 +7,13 @@ import {
     IERC20Like,
     ISwapRouterLike,
     IUniswapV3FlashCallback,
-    IUniswapV3PoolLike
+    IUniswapV3PoolLike,
+    PATH_ADDRESS_BYTES,
+    PATH_FEE_BYTES,
+    PATH_HOP_BYTES,
+    PATH_MIN_BYTES,
+    PATH_ADDRESS_SHIFT,
+    PATH_FEE_SHIFT
 } from "./FlashArbExecutorBase.sol";
 
 /// @title FlashArbExecutor (V3V3)
@@ -110,12 +116,16 @@ contract FlashArbExecutor is FlashArbExecutorBase, IUniswapV3FlashCallback {
         activeCallbackHash = bytes32(0);
 
         // Verify the flash pool actually delivered at least `borrowAmount` AJNA —
-        // compare current balance to the pinned pre-flash balance. The subtraction
-        // reverts on underflow, which would mean the pool transferred tokens OUT of
-        // us during flash (impossible for a well-behaved pool).
+        // compare current balance to the pinned pre-flash balance. Explicit
+        // underflow guard ensures `InvalidBorrowBalance` surfaces instead of a
+        // generic Panic(0x11) if the pool (impossibly, for a well-behaved pool)
+        // transferred tokens OUT of us during flash.
         uint256 preExistingAjnaBalance = preFlashAjnaBalance;
         uint256 startingAjnaBalance = IERC20Like(ajnaToken).balanceOf(address(this));
-        if (startingAjnaBalance - preExistingAjnaBalance < params.borrowAmount) {
+        if (
+            startingAjnaBalance < preExistingAjnaBalance ||
+            startingAjnaBalance - preExistingAjnaBalance < params.borrowAmount
+        ) {
             revert InvalidBorrowBalance();
         }
         uint256 repayAmount = params.borrowAmount + fee0 + fee1;
@@ -134,6 +144,12 @@ contract FlashArbExecutor is FlashArbExecutorBase, IUniswapV3FlashCallback {
 
             IAjnaPoolLike ajnaPool = IAjnaPoolLike(params.ajnaPool);
             uint256 quoteReceived = ajnaPool.takeReserves(params.quoteAmount);
+
+            // Residual allowance from under-consumption (takeReserves pulled
+            // less than params.borrowAmount at current auction price) would let
+            // a malicious or later-compromised ajnaPool drain future AJNA from
+            // this contract. Revoke immediately.
+            _revokeApproval(ajnaToken, params.ajnaPool);
 
             quoteToken = ajnaPool.quoteTokenAddress();
             uint256 quoteTokenScale = ajnaPool.quoteTokenScale();
@@ -166,6 +182,12 @@ contract FlashArbExecutor is FlashArbExecutorBase, IUniswapV3FlashCallback {
                 amountOutMinimum: params.minAjnaOut
             })
         );
+
+        // Revoke any residual quote-token allowance to the router in the same
+        // spirit as the ajnaPool revoke above — routers generally consume the
+        // full approved amount, but defense-in-depth prevents future drain
+        // vectors if the router is ever upgraded or compromised.
+        _revokeApproval(quoteToken, swapRouter);
 
         if (amountOut < repayAmount) revert InsufficientRepayment();
 
@@ -226,21 +248,24 @@ contract FlashArbExecutor is FlashArbExecutorBase, IUniswapV3FlashCallback {
         address flashToken1,
         uint24 flashFee
     ) internal pure {
-        if (path.length < 43 || (path.length - 20) % 23 != 0) revert InvalidSwapPath();
+        if (
+            path.length < PATH_MIN_BYTES ||
+            (path.length - PATH_ADDRESS_BYTES) % PATH_HOP_BYTES != 0
+        ) revert InvalidSwapPath();
 
         uint256 offset = 0;
         address tokenIn = _readPathAddress(path, offset);
         if (tokenIn != expectedInputToken) revert InvalidSwapPath();
 
-        while (offset + 20 < path.length) {
-            uint24 fee = _readPathFee(path, offset + 20);
-            address tokenOut = _readPathAddress(path, offset + 23);
+        while (offset + PATH_ADDRESS_BYTES < path.length) {
+            uint24 fee = _readPathFee(path, offset + PATH_ADDRESS_BYTES);
+            address tokenOut = _readPathAddress(path, offset + PATH_HOP_BYTES);
             if (_pathHopMatchesPool(tokenIn, tokenOut, fee, flashToken0, flashToken1, flashFee)) {
                 revert FlashPoolReuseInSwapPath();
             }
 
             tokenIn = tokenOut;
-            offset += 23;
+            offset += PATH_HOP_BYTES;
         }
 
         if (tokenIn != expectedOutputToken) revert InvalidSwapPath();
@@ -265,16 +290,16 @@ contract FlashArbExecutor is FlashArbExecutorBase, IUniswapV3FlashCallback {
     }
 
     function _readPathAddress(bytes memory path, uint256 start) internal pure returns (address addr) {
-        if (path.length < start + 20) revert InvalidSwapPath();
+        if (path.length < start + PATH_ADDRESS_BYTES) revert InvalidSwapPath();
         assembly {
-            addr := shr(96, mload(add(add(path, 0x20), start)))
+            addr := shr(PATH_ADDRESS_SHIFT, mload(add(add(path, 0x20), start)))
         }
     }
 
     function _readPathFee(bytes memory path, uint256 start) internal pure returns (uint24 fee) {
-        if (path.length < start + 3) revert InvalidSwapPath();
+        if (path.length < start + PATH_FEE_BYTES) revert InvalidSwapPath();
         assembly {
-            fee := shr(232, mload(add(add(path, 0x20), start)))
+            fee := shr(PATH_FEE_SHIFT, mload(add(add(path, 0x20), start)))
         }
     }
 

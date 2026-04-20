@@ -5,7 +5,11 @@ import {
     FlashArbExecutorBase,
     IAjnaPoolLike,
     IERC20Like,
-    ISwapRouterLike
+    ISwapRouterLike,
+    PATH_ADDRESS_BYTES,
+    PATH_HOP_BYTES,
+    PATH_MIN_BYTES,
+    PATH_ADDRESS_SHIFT
 } from "./FlashArbExecutorBase.sol";
 
 interface IUniswapV2Callee {
@@ -116,12 +120,16 @@ contract FlashArbExecutorV2V3 is FlashArbExecutorBase, IUniswapV2Callee {
         activeCallbackHash = bytes32(0);
 
         // Verify the flash pair actually delivered at least `borrowAmount` AJNA —
-        // compare current balance to the pinned pre-flash balance. This does NOT
-        // trust the callback-reported amounts (which are the pair's self-reported
-        // amountOut values and can be inflated by a malicious or buggy pair).
+        // compare current balance to the pinned pre-flash balance. Explicit
+        // underflow guard ensures `InvalidBorrowBalance` surfaces instead of a
+        // generic Panic(0x11) if the pair (impossibly, for a well-behaved pair)
+        // transferred tokens OUT of us during the callback.
         uint256 preExistingAjnaBalance = preFlashAjnaBalance;
         uint256 startingAjnaBalance = IERC20Like(ajnaToken).balanceOf(address(this));
-        if (startingAjnaBalance - preExistingAjnaBalance < params.borrowAmount) {
+        if (
+            startingAjnaBalance < preExistingAjnaBalance ||
+            startingAjnaBalance - preExistingAjnaBalance < params.borrowAmount
+        ) {
             revert InvalidBorrowBalance();
         }
         uint256 repayAmount = _calculateRepayAmount(params.borrowAmount);
@@ -139,6 +147,10 @@ contract FlashArbExecutorV2V3 is FlashArbExecutorBase, IUniswapV2Callee {
 
             IAjnaPoolLike ajnaPool = IAjnaPoolLike(params.ajnaPool);
             uint256 quoteReceived = ajnaPool.takeReserves(params.quoteAmount);
+
+            // Residual allowance from under-consumption would let a malicious
+            // or later-compromised ajnaPool drain future AJNA via transferFrom.
+            _revokeApproval(ajnaToken, params.ajnaPool);
 
             quoteToken = ajnaPool.quoteTokenAddress();
             uint256 quoteTokenScale = ajnaPool.quoteTokenScale();
@@ -164,6 +176,11 @@ contract FlashArbExecutorV2V3 is FlashArbExecutorBase, IUniswapV2Callee {
                 amountOutMinimum: params.minAjnaOut
             })
         );
+
+        // Defense-in-depth against future router upgrade/compromise — see the
+        // ajnaPool revoke above.
+        _revokeApproval(quoteToken, swapRouter);
+
         if (amountOut < repayAmount) revert InsufficientRepayment();
 
         _transferToken(ajnaToken, params.flashPair, repayAmount);
@@ -206,15 +223,18 @@ contract FlashArbExecutorV2V3 is FlashArbExecutorBase, IUniswapV2Callee {
         address expectedInputToken,
         address expectedOutputToken
     ) internal pure {
-        if (path.length < 43 || (path.length - 20) % 23 != 0) revert InvalidSwapPath();
+        if (
+            path.length < PATH_MIN_BYTES ||
+            (path.length - PATH_ADDRESS_BYTES) % PATH_HOP_BYTES != 0
+        ) revert InvalidSwapPath();
 
         uint256 offset = 0;
         address tokenIn = _readPathAddress(path, offset);
         if (tokenIn != expectedInputToken) revert InvalidSwapPath();
 
-        while (offset + 20 < path.length) {
-            tokenIn = _readPathAddress(path, offset + 23);
-            offset += 23;
+        while (offset + PATH_ADDRESS_BYTES < path.length) {
+            tokenIn = _readPathAddress(path, offset + PATH_HOP_BYTES);
+            offset += PATH_HOP_BYTES;
         }
 
         if (tokenIn != expectedOutputToken) revert InvalidSwapPath();
@@ -243,9 +263,9 @@ contract FlashArbExecutorV2V3 is FlashArbExecutorBase, IUniswapV2Callee {
     }
 
     function _readPathAddress(bytes memory path, uint256 start) internal pure returns (address addr) {
-        if (path.length < start + 20) revert InvalidSwapPath();
+        if (path.length < start + PATH_ADDRESS_BYTES) revert InvalidSwapPath();
         assembly {
-            addr := shr(96, mload(add(add(path, 0x20), start)))
+            addr := shr(PATH_ADDRESS_SHIFT, mload(add(add(path, 0x20), start)))
         }
     }
 

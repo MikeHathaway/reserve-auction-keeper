@@ -118,12 +118,16 @@ contract FlashArbExecutorV3V2 is FlashArbExecutorBase, IUniswapV3FlashCallback {
         activeCallbackHash = bytes32(0);
 
         // Verify the flash pool actually delivered at least `borrowAmount` AJNA —
-        // compare current balance to the pinned pre-flash balance. The subtraction
-        // reverts on underflow, which would mean the pool transferred tokens OUT of
-        // us during flash (impossible for a well-behaved pool).
+        // compare current balance to the pinned pre-flash balance. Explicit
+        // underflow guard ensures `InvalidBorrowBalance` surfaces instead of a
+        // generic Panic(0x11) if the pool (impossibly, for a well-behaved pool)
+        // transferred tokens OUT of us during flash.
         uint256 preExistingAjnaBalance = preFlashAjnaBalance;
         uint256 startingAjnaBalance = IERC20Like(ajnaToken).balanceOf(address(this));
-        if (startingAjnaBalance - preExistingAjnaBalance < params.borrowAmount) {
+        if (
+            startingAjnaBalance < preExistingAjnaBalance ||
+            startingAjnaBalance - preExistingAjnaBalance < params.borrowAmount
+        ) {
             revert InvalidBorrowBalance();
         }
         uint256 repayAmount = params.borrowAmount + fee0 + fee1;
@@ -142,6 +146,10 @@ contract FlashArbExecutorV3V2 is FlashArbExecutorBase, IUniswapV3FlashCallback {
 
             IAjnaPoolLike ajnaPool = IAjnaPoolLike(params.ajnaPool);
             uint256 quoteReceived = ajnaPool.takeReserves(params.quoteAmount);
+
+            // Residual allowance from under-consumption would let a malicious
+            // or later-compromised ajnaPool drain future AJNA via transferFrom.
+            _revokeApproval(ajnaToken, params.ajnaPool);
 
             quoteToken = ajnaPool.quoteTokenAddress();
             uint256 quoteTokenScale = ajnaPool.quoteTokenScale();
@@ -165,6 +173,11 @@ contract FlashArbExecutorV3V2 is FlashArbExecutorBase, IUniswapV3FlashCallback {
             address(this),
             block.timestamp
         );
+
+        // Defense-in-depth against future router upgrade/compromise — see the
+        // ajnaPool revoke above.
+        _revokeApproval(quoteToken, swapRouter);
+
         uint256 amountOut = amounts[amounts.length - 1];
         if (amountOut < repayAmount) revert InsufficientRepayment();
 

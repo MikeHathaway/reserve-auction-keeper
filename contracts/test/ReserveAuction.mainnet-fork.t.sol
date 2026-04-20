@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-import {IERC20Like, IAjnaPoolLike} from "../FlashArbExecutor.sol";
+import {IERC20Like, IAjnaPoolLike} from "../FlashArbExecutorBase.sol";
 import {TestBase} from "./TestBase.sol";
 
 interface IAjnaReservePoolLike is IAjnaPoolLike {

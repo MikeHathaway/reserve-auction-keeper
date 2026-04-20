@@ -785,4 +785,55 @@ contract FlashArbExecutorTest is TestBase {
         vm.expectRevert(abi.encodeWithSelector(FlashArbExecutorBase.InvalidAddress.selector));
         executor.recoverToken(address(frToken), profitRecipient, 42);
     }
+
+    function test_executeFlashArb_revokesResidualAjnaApprovalToAjnaPool() public {
+        // Use an Ajna pool whose auction price is below 1:1 (ajnaPerQuoteWad = 1
+        // vs the default 2), so takeReserves pulls only HALF the approved
+        // borrowAmount. Without the post-takeReserves revoke, the leftover
+        // allowance would be exploitable by a malicious/later-compromised pool
+        // calling transferFrom to drain pre-existing AJNA in a later tx.
+        MockAjnaPool underPullingAjnaPool = new MockAjnaPool(
+            address(ajna),
+            address(quote),
+            QUOTE_TOKEN_SCALE,
+            1 * WAD
+        );
+        quote.mint(address(underPullingAjnaPool), QUOTE_TOKEN_RAW);
+        router.setNextAmountOut(105 * WAD);
+
+        FlashArbExecutor.ExecuteParams memory params = FlashArbExecutor.ExecuteParams({
+            flashPool: address(flashPool),
+            ajnaPool: address(underPullingAjnaPool),
+            borrowAmount: 100 * WAD, // approve 100
+            quoteAmount: QUOTE_TOKEN_WAD, // cost = 50 (ajnaPerQuoteWad = 1)
+            swapPath: _swapPath(SWAP_PATH_FEE),
+            minAjnaOut: 51 * WAD,
+            profitRecipient: profitRecipient
+        });
+
+        executor.executeFlashArb(params);
+
+        assertEq(
+            ajna.allowance(address(executor), address(underPullingAjnaPool)),
+            0,
+            "executor must revoke residual AJNA allowance after takeReserves under-pull"
+        );
+        assertEq(
+            quote.allowance(address(executor), address(router)),
+            0,
+            "executor must revoke residual quote allowance after swap"
+        );
+    }
+
+    function test_recoverToken_revertsForEoaToken() public {
+        // `_safeTokenCall` now requires the token to have deployed code —
+        // calling `approve`/`transfer` on an EOA succeeds silently with empty
+        // return data and would otherwise be indistinguishable from a
+        // legitimate non-standard-token success.
+        address eoaToken = address(0x1234);
+        assertTrue(eoaToken.code.length == 0, "sanity: 0x1234 must be an EOA");
+
+        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutorBase.InvalidAddress.selector));
+        executor.recoverToken(eoaToken, profitRecipient, 1);
+    }
 }
