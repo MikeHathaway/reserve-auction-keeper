@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-import {IERC20Like} from "../../FlashArbExecutor.sol";
+import {IERC20Like} from "../../FlashArbExecutorBase.sol";
 
 contract MockAjnaPool {
     address public immutable ajnaToken;

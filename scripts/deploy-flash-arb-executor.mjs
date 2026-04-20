@@ -224,13 +224,27 @@ if (!SUPPORTED_EXECUTOR_KINDS.includes(executorKind)) {
   );
 }
 
+warnIfEnvOverridesPreset(
+  "FLASH_ARB_EXECUTOR_AJNA_TOKEN",
+  process.env.FLASH_ARB_EXECUTOR_AJNA_TOKEN,
+  preset?.ajnaToken,
+  chainName ?? "the active chain",
+);
 const ajnaToken = requireHex(
   "FLASH_ARB_EXECUTOR_AJNA_TOKEN",
   process.env.FLASH_ARB_EXECUTOR_AJNA_TOKEN || preset?.ajnaToken,
   40,
 );
-const defaultSwapRouter = process.env.FLASH_ARB_EXECUTOR_SWAP_ROUTER ||
-  (executorKind === "v3v2" ? preset?.uniswapV2?.swapRouter : preset?.uniswapV3?.swapRouter);
+const presetSwapRouter = executorKind === "v3v2"
+  ? preset?.uniswapV2?.swapRouter
+  : preset?.uniswapV3?.swapRouter;
+warnIfEnvOverridesPreset(
+  "FLASH_ARB_EXECUTOR_SWAP_ROUTER",
+  process.env.FLASH_ARB_EXECUTOR_SWAP_ROUTER,
+  presetSwapRouter,
+  chainName ?? "the active chain",
+);
+const defaultSwapRouter = process.env.FLASH_ARB_EXECUTOR_SWAP_ROUTER || presetSwapRouter;
 const swapRouter = requireHex(
   "FLASH_ARB_EXECUTOR_SWAP_ROUTER",
   defaultSwapRouter,
@@ -277,7 +291,28 @@ let deploymentDetails = {
   forgeArgs: sanitizeArgsForLogs(forgeArgs),
 };
 
+// When a chain preset defines a canonical factory / init-code-hash, these are the
+// values the executor will trust forever (they're immutable at construction). If an
+// operator sets an env override, we loudly flag the divergence — a typo or stale
+// shell var here silently turns off the executor's canonical-pool verification.
+function warnIfEnvOverridesPreset(envKey, envValue, presetValue, chainLabel) {
+  if (!envValue || !presetValue) return;
+  if (envValue.toLowerCase() === presetValue.toLowerCase()) return;
+  console.warn(
+    `⚠  ${envKey} env value (${envValue}) overrides the canonical preset for ` +
+      `${chainLabel} (${presetValue}). The deployed executor will trust pools ` +
+      `derived from the OVERRIDE, not the canonical Uniswap deployment. ` +
+      `Set ${envKey} to an empty string or unset it to use the preset.`,
+  );
+}
+
 if (executorKind === "v2v3") {
+  warnIfEnvOverridesPreset(
+    "FLASH_ARB_EXECUTOR_UNISWAP_V2_FACTORY",
+    process.env.FLASH_ARB_EXECUTOR_UNISWAP_V2_FACTORY,
+    preset?.uniswapV2?.factory,
+    chainName ?? "the active chain",
+  );
   const uniswapV2Factory = requireHex(
     "FLASH_ARB_EXECUTOR_UNISWAP_V2_FACTORY",
     process.env.FLASH_ARB_EXECUTOR_UNISWAP_V2_FACTORY || preset?.uniswapV2?.factory,
@@ -289,6 +324,18 @@ if (executorKind === "v2v3") {
     uniswapV2Factory,
   };
 } else {
+  warnIfEnvOverridesPreset(
+    "FLASH_ARB_EXECUTOR_UNISWAP_V3_FACTORY",
+    process.env.FLASH_ARB_EXECUTOR_UNISWAP_V3_FACTORY,
+    preset?.uniswapV3?.factory,
+    chainName ?? "the active chain",
+  );
+  warnIfEnvOverridesPreset(
+    "FLASH_ARB_EXECUTOR_UNISWAP_V3_POOL_INIT_CODE_HASH",
+    process.env.FLASH_ARB_EXECUTOR_UNISWAP_V3_POOL_INIT_CODE_HASH,
+    preset?.uniswapV3?.poolInitCodeHash ?? STANDARD_UNISWAP_V3_POOL_INIT_CODE_HASH,
+    chainName ?? "the active chain",
+  );
   const uniswapV3Factory = requireHex(
     "FLASH_ARB_EXECUTOR_UNISWAP_V3_FACTORY",
     process.env.FLASH_ARB_EXECUTOR_UNISWAP_V3_FACTORY || preset?.uniswapV3?.factory,

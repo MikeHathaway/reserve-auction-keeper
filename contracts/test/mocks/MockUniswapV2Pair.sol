@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-import {IERC20Like} from "../../FlashArbExecutor.sol";
+import {IERC20Like} from "../../FlashArbExecutorBase.sol";
 import {IUniswapV2Callee} from "../../FlashArbExecutorV2V3.sol";
 
 contract MockUniswapV2Pair {

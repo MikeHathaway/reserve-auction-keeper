@@ -1,14 +1,21 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-import {FlashArbExecutor, IERC20Like, ISwapRouterLike} from "../FlashArbExecutor.sol";
+import {FlashArbExecutor} from "../FlashArbExecutor.sol";
+import {FlashArbExecutorBase, IERC20Like, ISwapRouterLike} from "../FlashArbExecutorBase.sol";
 import {Log, TestBase} from "./TestBase.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
+import {MockNonStandardERC20} from "./mocks/MockNonStandardERC20.sol";
+import {MockFalseReturningERC20} from "./mocks/MockFalseReturningERC20.sol";
 import {MockAjnaPool} from "./mocks/MockAjnaPool.sol";
 import {MockMalformedAjnaPool} from "./mocks/MockMalformedAjnaPool.sol";
 import {MockSwapRouter} from "./mocks/MockSwapRouter.sol";
 import {MockUniswapV3Factory} from "./mocks/MockUniswapV3Factory.sol";
 import {MockUniswapV3Pool} from "./mocks/MockUniswapV3Pool.sol";
+import {
+    MockUnderdeliveringUniswapV3Factory,
+    MockUnderdeliveringUniswapV3Pool
+} from "./mocks/MockUnderdeliveringUniswapV3Pool.sol";
 
 contract OwnerProxy {
     function deployExecutor(
@@ -38,6 +45,72 @@ contract OwnerProxy {
         } catch {
             return false;
         }
+    }
+
+    function attemptExecuteFlashArb(
+        FlashArbExecutor executor,
+        FlashArbExecutor.ExecuteParams memory params
+    ) external returns (bool) {
+        try executor.executeFlashArb(params) {
+            return true;
+        } catch {
+            return false;
+        }
+    }
+}
+
+// Router that attempts to re-enter `executeFlashArb` during `exactInput`. Used
+// to verify the `nonReentrant` modifier rejects recursive entry while a flash
+// is in progress.
+contract ReenteringExecuteRouter is ISwapRouterLike {
+    address public immutable quoteToken;
+    address public immutable ajnaToken;
+    OwnerProxy public immutable ownerProxy;
+    FlashArbExecutor public executor;
+
+    uint256 public nextAmountOut;
+    FlashArbExecutor.ExecuteParams public recursiveParams;
+    bool public recursiveAttempted;
+    bool public recursiveSucceeded;
+
+    constructor(
+        address quoteToken_,
+        address ajnaToken_,
+        OwnerProxy ownerProxy_
+    ) {
+        quoteToken = quoteToken_;
+        ajnaToken = ajnaToken_;
+        ownerProxy = ownerProxy_;
+    }
+
+    function setExecutor(FlashArbExecutor executor_) external {
+        executor = executor_;
+    }
+
+    function setNextAmountOut(uint256 amountOut) external {
+        nextAmountOut = amountOut;
+    }
+
+    function setRecursiveParams(FlashArbExecutor.ExecuteParams memory params) external {
+        recursiveParams = params;
+    }
+
+    function exactInput(ExactInputParams calldata params) external payable returns (uint256 amountOut) {
+        require(
+            IERC20Like(quoteToken).transferFrom(msg.sender, address(this), params.amountIn),
+            "QUOTE_IN"
+        );
+
+        recursiveAttempted = true;
+        recursiveSucceeded = ownerProxy.attemptExecuteFlashArb(executor, recursiveParams);
+
+        require(nextAmountOut >= params.amountOutMinimum, "MIN_OUT");
+        require(
+            IERC20Like(ajnaToken).transfer(params.recipient, nextAmountOut),
+            "AJNA_OUT"
+        );
+
+        return nextAmountOut;
     }
 }
 
@@ -208,6 +281,62 @@ contract FlashArbExecutorTest is TestBase {
         assertEq(ajna.balanceOf(profitRecipient), 4 * WAD, "profit recipient should receive only trade profit");
     }
 
+    function test_executeFlashArb_revertsWhenFlashPoolUnderDelivers() public {
+        // Deploy an under-delivering factory + pool and a fresh executor whose
+        // canonical-pool verification is deliberately pinned to the under-delivering
+        // pool's init code. This isolates the balance-delta check as the unit under
+        // test: the canonical check passes (by configuration), and the ONLY remaining
+        // defense against the pool draining pre-existing AJNA is
+        // `startingAjnaBalance - preFlashAjnaBalance >= borrowAmount`.
+        MockUnderdeliveringUniswapV3Factory underdeliveringFactory =
+            new MockUnderdeliveringUniswapV3Factory();
+        FlashArbExecutor underdeliveringExecutor = new FlashArbExecutor(
+            address(ajna),
+            address(router),
+            address(underdeliveringFactory),
+            keccak256(type(MockUnderdeliveringUniswapV3Pool).creationCode)
+        );
+
+        uint256 borrowAmount = 100 * WAD;
+        uint256 shortfall = 1 * WAD;
+        MockUnderdeliveringUniswapV3Pool underdeliveringPool = MockUnderdeliveringUniswapV3Pool(
+            underdeliveringFactory.createPool(
+                address(ajna),
+                address(quote),
+                POOL_FEE,
+                1 * WAD, // fee0
+                0,
+                shortfall
+            )
+        );
+
+        // Pool needs enough AJNA to transfer the (reduced) flash amount.
+        ajna.mint(address(underdeliveringPool), borrowAmount);
+        // Pre-existing AJNA in executor — the very balance a lazy check would
+        // silently let the pool drain.
+        ajna.mint(address(underdeliveringExecutor), 50 * WAD);
+
+        FlashArbExecutor.ExecuteParams memory params = FlashArbExecutor.ExecuteParams({
+            flashPool: address(underdeliveringPool),
+            ajnaPool: address(ajnaPool),
+            borrowAmount: borrowAmount,
+            quoteAmount: QUOTE_TOKEN_WAD,
+            swapPath: _swapPath(SWAP_PATH_FEE),
+            minAjnaOut: 104 * WAD,
+            profitRecipient: profitRecipient
+        });
+
+        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutorBase.InvalidBorrowBalance.selector));
+        underdeliveringExecutor.executeFlashArb(params);
+
+        // Pre-existing balance must remain untouched after the revert.
+        assertEq(
+            ajna.balanceOf(address(underdeliveringExecutor)),
+            50 * WAD,
+            "pre-existing AJNA must not be drained by under-delivery"
+        );
+    }
+
     function test_executeFlashArb_repaysWhenAjnaIsToken1() public {
         router.setNextAmountOut(105 * WAD);
 
@@ -246,7 +375,7 @@ contract FlashArbExecutorTest is TestBase {
             profitRecipient: profitRecipient
         });
 
-        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutor.UnauthorizedCallback.selector));
+        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutorBase.UnauthorizedCallback.selector));
         flashPool.flash(address(executor), 100 * WAD, 0, abi.encode(params));
     }
 
@@ -261,7 +390,7 @@ contract FlashArbExecutorTest is TestBase {
             profitRecipient: profitRecipient
         });
 
-        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutor.InvalidFlashPool.selector));
+        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutorBase.UnauthorizedCallback.selector));
         executor.uniswapV3FlashCallback(0, 0, abi.encode(params));
     }
 
@@ -278,7 +407,7 @@ contract FlashArbExecutorTest is TestBase {
             profitRecipient: profitRecipient
         });
 
-        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutor.InsufficientRepayment.selector));
+        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutorBase.InsufficientRepayment.selector));
         executor.executeFlashArb(params);
     }
 
@@ -298,7 +427,7 @@ contract FlashArbExecutorTest is TestBase {
             profitRecipient: profitRecipient
         });
 
-        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutor.UnsupportedBorrowToken.selector));
+        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutorBase.UnsupportedBorrowToken.selector));
         executor.executeFlashArb(params);
     }
 
@@ -357,7 +486,7 @@ contract FlashArbExecutorTest is TestBase {
         });
 
         vm.prank(address(0xCAFE));
-        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutor.Unauthorized.selector));
+        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutorBase.Unauthorized.selector));
         executor.executeFlashArb(params);
     }
 
@@ -372,7 +501,7 @@ contract FlashArbExecutorTest is TestBase {
             profitRecipient: address(0)
         });
 
-        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutor.InvalidAddress.selector));
+        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutorBase.InvalidAddress.selector));
         executor.executeFlashArb(params);
     }
 
@@ -387,7 +516,7 @@ contract FlashArbExecutorTest is TestBase {
             profitRecipient: profitRecipient
         });
 
-        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutor.InvalidParams.selector));
+        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutorBase.InvalidParams.selector));
         executor.executeFlashArb(params);
     }
 
@@ -402,7 +531,7 @@ contract FlashArbExecutorTest is TestBase {
             profitRecipient: profitRecipient
         });
 
-        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutor.InvalidParams.selector));
+        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutorBase.InvalidParams.selector));
         executor.executeFlashArb(params);
     }
 
@@ -417,7 +546,7 @@ contract FlashArbExecutorTest is TestBase {
             profitRecipient: profitRecipient
         });
 
-        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutor.InvalidParams.selector));
+        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutorBase.InvalidParams.selector));
         executor.executeFlashArb(params);
     }
 
@@ -436,7 +565,7 @@ contract FlashArbExecutorTest is TestBase {
         stranded.mint(address(executor), 123);
 
         vm.prank(address(0xCAFE));
-        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutor.Unauthorized.selector));
+        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutorBase.Unauthorized.selector));
         executor.recoverToken(address(stranded), profitRecipient, 123);
     }
 
@@ -530,7 +659,7 @@ contract FlashArbExecutorTest is TestBase {
             profitRecipient: profitRecipient
         });
 
-        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutor.InvalidQuoteAmount.selector));
+        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutorBase.InvalidQuoteAmount.selector));
         executor.executeFlashArb(params);
     }
 
@@ -566,7 +695,145 @@ contract FlashArbExecutorTest is TestBase {
             profitRecipient: profitRecipient
         });
 
-        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutor.InvalidSwapPath.selector));
+        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutorBase.InvalidSwapPath.selector));
         executor.executeFlashArb(params);
+    }
+
+    function test_executeFlashArb_revertsOnReentrantCall() public {
+        // The nonReentrant modifier on executeFlashArb should reject a nested
+        // call triggered during the flash callback. Here a malicious router
+        // calls back into ownerProxy.executeFlashArb during exactInput.
+        MockERC20 localAjna = new MockERC20("Ajna", "AJNA");
+        MockERC20 localQuote = new MockERC20("Quote", "QUOTE");
+        MockUniswapV3Factory localFactory = new MockUniswapV3Factory();
+        OwnerProxy ownerProxy = new OwnerProxy();
+
+        ReenteringExecuteRouter reenteringRouter = new ReenteringExecuteRouter(
+            address(localQuote),
+            address(localAjna),
+            ownerProxy
+        );
+
+        FlashArbExecutor proxyOwnedExecutor = ownerProxy.deployExecutor(
+            address(localAjna),
+            address(reenteringRouter),
+            address(localFactory),
+            keccak256(type(MockUniswapV3Pool).creationCode)
+        );
+        reenteringRouter.setExecutor(proxyOwnedExecutor);
+
+        MockAjnaPool localAjnaPool = new MockAjnaPool(
+            address(localAjna),
+            address(localQuote),
+            QUOTE_TOKEN_SCALE,
+            2 * WAD
+        );
+        MockUniswapV3Pool localFlashPool = MockUniswapV3Pool(
+            localFactory.createPool(address(localAjna), address(localQuote), POOL_FEE, 1 * WAD, 0)
+        );
+
+        localAjna.mint(address(localFlashPool), 200 * WAD);
+        localQuote.mint(address(localAjnaPool), QUOTE_TOKEN_RAW);
+        localAjna.mint(address(reenteringRouter), 105 * WAD);
+
+        reenteringRouter.setNextAmountOut(105 * WAD);
+
+        FlashArbExecutor.ExecuteParams memory params = FlashArbExecutor.ExecuteParams({
+            flashPool: address(localFlashPool),
+            ajnaPool: address(localAjnaPool),
+            borrowAmount: 100 * WAD,
+            quoteAmount: QUOTE_TOKEN_WAD,
+            swapPath: _swapPathFor(address(localQuote), SWAP_PATH_FEE, address(localAjna)),
+            minAjnaOut: 104 * WAD,
+            profitRecipient: profitRecipient
+        });
+        reenteringRouter.setRecursiveParams(params);
+
+        ownerProxy.executeFlashArb(proxyOwnedExecutor, params);
+
+        assertTrue(reenteringRouter.recursiveAttempted(), "router should attempt recursive execute");
+        assertTrue(
+            !reenteringRouter.recursiveSucceeded(),
+            "recursive executeFlashArb must be rejected by nonReentrant guard"
+        );
+    }
+
+    function test_safeTokenCall_acceptsNonStandardTokenReturn() public {
+        // USDT-style token (approve/transfer return no data) must flow through
+        // `_safeTokenCall`'s length==0 success branch. Exercised via recoverToken,
+        // which routes _transferToken → _safeTokenCall on the provided token.
+        MockNonStandardERC20 nsToken = new MockNonStandardERC20("Non-Standard", "NS");
+        nsToken.mint(address(executor), 42);
+
+        executor.recoverToken(address(nsToken), profitRecipient, 42);
+
+        assertEq(
+            nsToken.balanceOf(profitRecipient),
+            42,
+            "non-standard token should transfer successfully via _safeTokenCall"
+        );
+    }
+
+    function test_safeTokenCall_rejectsFalseReturningToken() public {
+        // Malicious token that returns `false` from transfer must be caught by
+        // `_safeTokenCall`'s `returnData.length > 0 && !decoded-bool` branch and
+        // revert with InvalidAddress — silently accepting the failure would be
+        // unsafe. Exercised via recoverToken → _transferToken → _safeTokenCall.
+        MockFalseReturningERC20 frToken = new MockFalseReturningERC20("False", "FR");
+        frToken.mint(address(executor), 42);
+
+        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutorBase.InvalidAddress.selector));
+        executor.recoverToken(address(frToken), profitRecipient, 42);
+    }
+
+    function test_executeFlashArb_revokesResidualAjnaApprovalToAjnaPool() public {
+        // Use an Ajna pool whose auction price is below 1:1 (ajnaPerQuoteWad = 1
+        // vs the default 2), so takeReserves pulls only HALF the approved
+        // borrowAmount. Without the post-takeReserves revoke, the leftover
+        // allowance would be exploitable by a malicious/later-compromised pool
+        // calling transferFrom to drain pre-existing AJNA in a later tx.
+        MockAjnaPool underPullingAjnaPool = new MockAjnaPool(
+            address(ajna),
+            address(quote),
+            QUOTE_TOKEN_SCALE,
+            1 * WAD
+        );
+        quote.mint(address(underPullingAjnaPool), QUOTE_TOKEN_RAW);
+        router.setNextAmountOut(105 * WAD);
+
+        FlashArbExecutor.ExecuteParams memory params = FlashArbExecutor.ExecuteParams({
+            flashPool: address(flashPool),
+            ajnaPool: address(underPullingAjnaPool),
+            borrowAmount: 100 * WAD, // approve 100
+            quoteAmount: QUOTE_TOKEN_WAD, // cost = 50 (ajnaPerQuoteWad = 1)
+            swapPath: _swapPath(SWAP_PATH_FEE),
+            minAjnaOut: 51 * WAD,
+            profitRecipient: profitRecipient
+        });
+
+        executor.executeFlashArb(params);
+
+        assertEq(
+            ajna.allowance(address(executor), address(underPullingAjnaPool)),
+            0,
+            "executor must revoke residual AJNA allowance after takeReserves under-pull"
+        );
+        assertEq(
+            quote.allowance(address(executor), address(router)),
+            0,
+            "executor must revoke residual quote allowance after swap"
+        );
+    }
+
+    function test_recoverToken_revertsForEoaToken() public {
+        // `_safeTokenCall` now requires the token to have deployed code —
+        // calling `approve`/`transfer` on an EOA succeeds silently with empty
+        // return data and would otherwise be indistinguishable from a
+        // legitimate non-standard-token success.
+        address eoaToken = address(0x1234);
+        assertTrue(eoaToken.code.length == 0, "sanity: 0x1234 must be an EOA");
+
+        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutorBase.InvalidAddress.selector));
+        executor.recoverToken(eoaToken, profitRecipient, 1);
     }
 }
