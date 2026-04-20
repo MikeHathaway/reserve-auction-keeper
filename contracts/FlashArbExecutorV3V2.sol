@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-import {IAjnaPoolLike, IERC20Like, IUniswapV3FlashCallback, IUniswapV3PoolLike} from "./FlashArbExecutor.sol";
+import {
+    FlashArbExecutorBase,
+    IAjnaPoolLike,
+    IERC20Like,
+    IUniswapV3FlashCallback,
+    IUniswapV3PoolLike
+} from "./FlashArbExecutorBase.sol";
 
 interface IUniswapV2RouterLike {
     function swapExactTokensForTokens(
@@ -21,20 +27,10 @@ interface IUniswapV2RouterLike {
 /// (2) msg.sender equals the `activeFlashPool` set by `executeFlashArb`,
 /// (3) keccak256(callback data) equals the `activeCallbackHash` of the originally
 /// submitted params. Any bypass attempt must break all three.
-contract FlashArbExecutorV3V2 is IUniswapV3FlashCallback {
-    error Unauthorized();
-    error UnauthorizedCallback();
-    error ActiveFlashExecution();
-    error InvalidAddress();
+contract FlashArbExecutorV3V2 is FlashArbExecutorBase, IUniswapV3FlashCallback {
     error InvalidConfig();
-    error InvalidParams();
     error InvalidFlashPool();
     error InvalidFactoryPool();
-    error InvalidBorrowBalance();
-    error InvalidQuoteAmount();
-    error InvalidSwapPath();
-    error UnsupportedBorrowToken();
-    error InsufficientRepayment();
 
     struct ExecuteParams {
         address flashPool;
@@ -46,19 +42,10 @@ contract FlashArbExecutorV3V2 is IUniswapV3FlashCallback {
         address profitRecipient;
     }
 
-    address public immutable ajnaToken;
-    address public immutable swapRouter;
     address public immutable uniswapV3Factory;
     bytes32 public immutable uniswapV3PoolInitCodeHash;
-    address public immutable owner;
 
     address private activeFlashPool;
-    bytes32 private activeCallbackHash;
-    uint256 private preFlashAjnaBalance;
-    // Load-bearing for TWO invariants: (1) `nonReentrant` modifier guard,
-    // (2) `_isFlashActive()` gate that blocks `recoverToken` during execution.
-    // Any refactor that changes this variable's lifecycle must preserve both.
-    bool private flashExecutionActive;
 
     event FlashArbExecuted(
         address indexed flashPool,
@@ -68,39 +55,18 @@ contract FlashArbExecutorV3V2 is IUniswapV3FlashCallback {
         uint256 repaidAjna,
         uint256 profitAjna
     );
-    event TokenRecovered(address indexed token, address indexed to, uint256 amount);
-
-    modifier onlyOwner() {
-        if (msg.sender != owner) revert Unauthorized();
-        _;
-    }
-
-    /// @dev Reuses `flashExecutionActive` as a reentrancy guard. Prevents the owner
-    /// (or any contract the owner routes through) from invoking `executeFlashArb`
-    /// recursively while a flash is in progress.
-    modifier nonReentrant() {
-        if (flashExecutionActive) revert ActiveFlashExecution();
-        flashExecutionActive = true;
-        _;
-        flashExecutionActive = false;
-    }
 
     constructor(
         address ajnaToken_,
         address swapRouter_,
         address uniswapV3Factory_,
         bytes32 uniswapV3PoolInitCodeHash_
-    ) {
-        if (ajnaToken_ == address(0) || swapRouter_ == address(0) || uniswapV3Factory_ == address(0)) {
-            revert InvalidAddress();
-        }
+    ) FlashArbExecutorBase(ajnaToken_, swapRouter_) {
+        if (uniswapV3Factory_ == address(0)) revert InvalidAddress();
         if (uniswapV3PoolInitCodeHash_ == bytes32(0)) revert InvalidConfig();
 
-        ajnaToken = ajnaToken_;
-        swapRouter = swapRouter_;
         uniswapV3Factory = uniswapV3Factory_;
         uniswapV3PoolInitCodeHash = uniswapV3PoolInitCodeHash_;
-        owner = msg.sender;
     }
 
     /// @notice Initiate a V3-flash → Ajna takeReserves → V2-swap → repay+profit cycle.
@@ -219,17 +185,6 @@ contract FlashArbExecutorV3V2 is IUniswapV3FlashCallback {
         );
     }
 
-    /// @notice Sweep any token held by this contract to a recipient. Intended for
-    /// recovering dust, blacklisted tokens, or funds stuck after a partial-fill
-    /// edge case. Blocked during an active flash execution.
-    function recoverToken(address token, address to, uint256 amount) external onlyOwner {
-        if (_isFlashActive()) revert ActiveFlashExecution();
-        if (token == address(0) || to == address(0)) revert InvalidAddress();
-
-        _transferToken(token, to, amount);
-        emit TokenRecovered(token, to, amount);
-    }
-
     function isCanonicalFactoryPool(address flashPool) external view returns (bool) {
         return _isCanonicalFactoryPool(flashPool);
     }
@@ -261,31 +216,6 @@ contract FlashArbExecutorV3V2 is IUniswapV3FlashCallback {
         return expected == flashPool;
     }
 
-    function _approveExact(address token, address spender, uint256 amount) internal {
-        _safeTokenCall(token, abi.encodeWithSelector(IERC20Like.approve.selector, spender, uint256(0)));
-        _safeTokenCall(token, abi.encodeWithSelector(IERC20Like.approve.selector, spender, amount));
-    }
-
-    function _transferToken(address token, address to, uint256 amount) internal {
-        _safeTokenCall(token, abi.encodeWithSelector(IERC20Like.transfer.selector, to, amount));
-    }
-
-    // Safe ERC20 call: accepts both standard (returns bool) and non-standard
-    // (returns nothing, e.g. USDT) tokens. Revert reasons from the token are
-    // preserved via assembly-level bubble-up; otherwise reverts InvalidAddress.
-    function _safeTokenCall(address token, bytes memory data) private {
-        (bool success, bytes memory returnData) = token.call(data);
-        if (!success) {
-            if (returnData.length > 0) {
-                assembly {
-                    revert(add(returnData, 32), mload(returnData))
-                }
-            }
-            revert InvalidAddress();
-        }
-        if (returnData.length > 0 && !abi.decode(returnData, (bool))) revert InvalidAddress();
-    }
-
     function _validateParams(ExecuteParams calldata params) internal pure {
         if (
             params.flashPool == address(0) ||
@@ -314,10 +244,6 @@ contract FlashArbExecutorV3V2 is IUniswapV3FlashCallback {
         if (path.length < 2) revert InvalidSwapPath();
         if (path[0] != expectedInputToken) revert InvalidSwapPath();
         if (path[path.length - 1] != expectedOutputToken) revert InvalidSwapPath();
-    }
-
-    function _isFlashActive() internal view returns (bool) {
-        return flashExecutionActive;
     }
 
     function _readPoolIdentity(

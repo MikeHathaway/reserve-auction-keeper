@@ -224,13 +224,27 @@ if (!SUPPORTED_EXECUTOR_KINDS.includes(executorKind)) {
   );
 }
 
+warnIfEnvOverridesPreset(
+  "FLASH_ARB_EXECUTOR_AJNA_TOKEN",
+  process.env.FLASH_ARB_EXECUTOR_AJNA_TOKEN,
+  preset?.ajnaToken,
+  chainName ?? "the active chain",
+);
 const ajnaToken = requireHex(
   "FLASH_ARB_EXECUTOR_AJNA_TOKEN",
   process.env.FLASH_ARB_EXECUTOR_AJNA_TOKEN || preset?.ajnaToken,
   40,
 );
-const defaultSwapRouter = process.env.FLASH_ARB_EXECUTOR_SWAP_ROUTER ||
-  (executorKind === "v3v2" ? preset?.uniswapV2?.swapRouter : preset?.uniswapV3?.swapRouter);
+const presetSwapRouter = executorKind === "v3v2"
+  ? preset?.uniswapV2?.swapRouter
+  : preset?.uniswapV3?.swapRouter;
+warnIfEnvOverridesPreset(
+  "FLASH_ARB_EXECUTOR_SWAP_ROUTER",
+  process.env.FLASH_ARB_EXECUTOR_SWAP_ROUTER,
+  presetSwapRouter,
+  chainName ?? "the active chain",
+);
+const defaultSwapRouter = process.env.FLASH_ARB_EXECUTOR_SWAP_ROUTER || presetSwapRouter;
 const swapRouter = requireHex(
   "FLASH_ARB_EXECUTOR_SWAP_ROUTER",
   defaultSwapRouter,

@@ -8,6 +8,10 @@ import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockUniswapV2Router} from "./mocks/MockUniswapV2Router.sol";
 import {MockUniswapV3Factory} from "./mocks/MockUniswapV3Factory.sol";
 import {MockUniswapV3Pool} from "./mocks/MockUniswapV3Pool.sol";
+import {
+    MockUnderdeliveringUniswapV3Factory,
+    MockUnderdeliveringUniswapV3Pool
+} from "./mocks/MockUnderdeliveringUniswapV3Pool.sol";
 
 contract UnauthorizedFlashArbActorV3V2 {
     function tryUnauthorizedExecute(
@@ -66,6 +70,12 @@ contract FlashArbExecutorV3V2Handler {
     FlashArbExecutorV3V2 internal executor;
     UnauthorizedFlashArbActorV3V2 internal attacker;
 
+    MockUnderdeliveringUniswapV3Factory internal underdeliveringFactory;
+    MockUnderdeliveringUniswapV3Pool internal underdeliveringPool;
+    FlashArbExecutorV3V2 internal underdeliveringExecutor;
+    uint256 internal underdeliveringPreSeededBalance;
+    uint256 internal constant UNDERDELIVERY_SHORTFALL = 1 * WAD;
+
     address internal constant PROFIT_RECIPIENT = address(0xBEEF);
 
     uint256 internal immutable quoteTokenScale;
@@ -122,6 +132,36 @@ contract FlashArbExecutorV3V2Handler {
         ajna.mint(address(router), 1_000_000_000 * WAD);
 
         expectedFlashPoolBalance = ajna.balanceOf(address(flashPool));
+
+        underdeliveringFactory = new MockUnderdeliveringUniswapV3Factory();
+        underdeliveringExecutor = new FlashArbExecutorV3V2(
+            address(ajna),
+            address(router),
+            address(underdeliveringFactory),
+            keccak256(type(MockUnderdeliveringUniswapV3Pool).creationCode)
+        );
+        underdeliveringPool = ajnaIsToken0
+            ? MockUnderdeliveringUniswapV3Pool(
+                underdeliveringFactory.createPool(
+                    address(ajna),
+                    address(quote),
+                    POOL_FEE,
+                    FLASH_FEE,
+                    0,
+                    UNDERDELIVERY_SHORTFALL
+                )
+            )
+            : MockUnderdeliveringUniswapV3Pool(
+                underdeliveringFactory.createPool(
+                    address(quote),
+                    address(ajna),
+                    POOL_FEE,
+                    0,
+                    FLASH_FEE,
+                    UNDERDELIVERY_SHORTFALL
+                )
+            );
+        ajna.mint(address(underdeliveringPool), 1_000_000_000 * WAD);
     }
 
     function executeScenario(
@@ -215,8 +255,41 @@ contract FlashArbExecutorV3V2Handler {
         _assertSnapshotUnchanged(before);
     }
 
+    function attemptUnderdeliveringExecute(
+        uint96 normalizedQuoteSeed,
+        uint96 profitSeed,
+        uint96 preseededAjnaSeed
+    ) external {
+        uint256 preseededAjna = _bound(preseededAjnaSeed, 1, MAX_PRESEEDED);
+        ajna.mint(address(underdeliveringExecutor), preseededAjna);
+        underdeliveringPreSeededBalance += preseededAjna;
+
+        FlashArbExecutorV3V2.ExecuteParams memory params = _buildParams(
+            normalizedQuoteSeed,
+            profitSeed
+        );
+        params.flashPool = address(underdeliveringPool);
+        router.setNextAmountOut(params.minAjnaOut);
+
+        bool reverted;
+        try underdeliveringExecutor.executeFlashArb(params) {
+            reverted = false;
+        } catch {
+            reverted = true;
+        }
+        require(reverted, "under-delivery call must revert");
+    }
+
     function profitRecipientBalance() external view returns (uint256) {
         return ajna.balanceOf(PROFIT_RECIPIENT);
+    }
+
+    function underdeliveringExecutorBalance() external view returns (uint256) {
+        return ajna.balanceOf(address(underdeliveringExecutor));
+    }
+
+    function expectedUnderdeliveringBalance() external view returns (uint256) {
+        return underdeliveringPreSeededBalance;
     }
 
     function expectedProfitBalance() external view returns (uint256) {
@@ -341,11 +414,12 @@ contract FlashArbExecutorV3V2InvariantTest is InvariantBase {
         handlers.push(handler);
         targetContract(address(handler));
 
-        bytes4[] memory selectors = new bytes4[](4);
+        bytes4[] memory selectors = new bytes4[](5);
         selectors[0] = handler.executeScenario.selector;
         selectors[1] = handler.attemptUnauthorizedExecute.selector;
         selectors[2] = handler.attemptUnauthorizedPoolCallback.selector;
         selectors[3] = handler.attemptUnauthorizedDirectCallback.selector;
+        selectors[4] = handler.attemptUnderdeliveringExecute.selector;
         targetSelector(FuzzSelector({
             addr: address(handler),
             selectors: selectors
@@ -392,6 +466,17 @@ contract FlashArbExecutorV3V2InvariantTest is InvariantBase {
                 handler.flashPoolBalance(),
                 handler.expectedFlashPoolAjnaBalance(),
                 "flash pool should keep principal and accrue exactly the configured fee"
+            );
+        }
+    }
+
+    function invariant_underdeliveryCannotDrainExecutor() public view {
+        for (uint256 i = 0; i < handlers.length; i++) {
+            FlashArbExecutorV3V2Handler handler = handlers[i];
+            assertEq(
+                handler.underdeliveringExecutorBalance(),
+                handler.expectedUnderdeliveringBalance(),
+                "under-delivering pool must never drain pre-seeded AJNA from its executor"
             );
         }
     }

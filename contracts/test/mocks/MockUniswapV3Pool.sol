@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-import {IERC20Like, IUniswapV3FlashCallback} from "../../FlashArbExecutor.sol";
+import {IERC20Like, IUniswapV3FlashCallback} from "../../FlashArbExecutorBase.sol";
 
 interface IMockUniswapV3Factory {
     function parameters()

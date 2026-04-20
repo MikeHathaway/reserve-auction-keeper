@@ -2,6 +2,7 @@
 pragma solidity ^0.8.26;
 
 import {FlashArbExecutorV3V2} from "../FlashArbExecutorV3V2.sol";
+import {FlashArbExecutorBase} from "../FlashArbExecutorBase.sol";
 import {Log, TestBase} from "./TestBase.sol";
 import {MockAjnaPool} from "./mocks/MockAjnaPool.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
@@ -9,6 +10,10 @@ import {MockMalformedAjnaPool} from "./mocks/MockMalformedAjnaPool.sol";
 import {MockUniswapV2Router} from "./mocks/MockUniswapV2Router.sol";
 import {MockUniswapV3Factory} from "./mocks/MockUniswapV3Factory.sol";
 import {MockUniswapV3Pool} from "./mocks/MockUniswapV3Pool.sol";
+import {
+    MockUnderdeliveringUniswapV3Factory,
+    MockUnderdeliveringUniswapV3Pool
+} from "./mocks/MockUnderdeliveringUniswapV3Pool.sol";
 
 contract FlashArbExecutorV3V2Test is TestBase {
     uint256 internal constant WAD = 1e18;
@@ -117,7 +122,7 @@ contract FlashArbExecutorV3V2Test is TestBase {
             profitRecipient: profitRecipient
         });
 
-        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutorV3V2.UnauthorizedCallback.selector));
+        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutorBase.UnauthorizedCallback.selector));
         executor.uniswapV3FlashCallback(0, 0, abi.encode(params));
     }
 
@@ -143,6 +148,57 @@ contract FlashArbExecutorV3V2Test is TestBase {
         executor.executeFlashArb(params);
     }
 
+    function test_executeFlashArb_revertsWhenFlashPoolUnderDelivers() public {
+        // Fresh executor with canonical-pool verification deliberately pinned to the
+        // under-delivering pool's init code. This isolates the balance-delta check
+        // as the unit under test: the canonical check passes (by configuration) and
+        // the ONLY remaining defense against a misbehaving pool draining pre-existing
+        // AJNA is `startingAjnaBalance - preFlashAjnaBalance >= borrowAmount`.
+        MockUnderdeliveringUniswapV3Factory underdeliveringFactory =
+            new MockUnderdeliveringUniswapV3Factory();
+        FlashArbExecutorV3V2 underdeliveringExecutor = new FlashArbExecutorV3V2(
+            address(ajna),
+            address(router),
+            address(underdeliveringFactory),
+            keccak256(type(MockUnderdeliveringUniswapV3Pool).creationCode)
+        );
+
+        uint256 borrowAmount = 100 * WAD;
+        uint256 shortfall = 1 * WAD;
+        MockUnderdeliveringUniswapV3Pool underdeliveringPool = MockUnderdeliveringUniswapV3Pool(
+            underdeliveringFactory.createPool(
+                address(ajna),
+                address(quote),
+                POOL_FEE,
+                1 * WAD,
+                0,
+                shortfall
+            )
+        );
+
+        ajna.mint(address(underdeliveringPool), borrowAmount);
+        ajna.mint(address(underdeliveringExecutor), 50 * WAD);
+
+        FlashArbExecutorV3V2.ExecuteParams memory params = FlashArbExecutorV3V2.ExecuteParams({
+            flashPool: address(underdeliveringPool),
+            ajnaPool: address(ajnaPool),
+            borrowAmount: borrowAmount,
+            quoteAmount: QUOTE_TOKEN_WAD,
+            swapPath: _swapPath(),
+            minAjnaOut: 104 * WAD,
+            profitRecipient: profitRecipient
+        });
+
+        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutorBase.InvalidBorrowBalance.selector));
+        underdeliveringExecutor.executeFlashArb(params);
+
+        assertEq(
+            ajna.balanceOf(address(underdeliveringExecutor)),
+            50 * WAD,
+            "pre-existing AJNA must not be drained by under-delivery"
+        );
+    }
+
     function test_executeFlashArb_revertsWhenSwapPathDoesNotStartWithQuoteToken() public {
         router.setNextAmountOut(105 * WAD);
         address[] memory invalidPath = new address[](2);
@@ -159,7 +215,7 @@ contract FlashArbExecutorV3V2Test is TestBase {
             profitRecipient: profitRecipient
         });
 
-        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutorV3V2.InvalidSwapPath.selector));
+        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutorBase.InvalidSwapPath.selector));
         executor.executeFlashArb(params);
     }
 
@@ -175,7 +231,26 @@ contract FlashArbExecutorV3V2Test is TestBase {
         });
 
         vm.prank(address(0xCAFE));
-        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutorV3V2.Unauthorized.selector));
+        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutorBase.Unauthorized.selector));
         executor.executeFlashArb(params);
+    }
+
+    function test_recoverToken_transfersStrandedTokens() public {
+        MockERC20 stranded = new MockERC20("Stranded", "STR");
+        stranded.mint(address(executor), 123);
+
+        executor.recoverToken(address(stranded), profitRecipient, 123);
+
+        assertEq(stranded.balanceOf(address(executor)), 0, "executor should not retain stranded tokens");
+        assertEq(stranded.balanceOf(profitRecipient), 123, "recipient should receive recovered tokens");
+    }
+
+    function test_recoverToken_onlyOwner() public {
+        MockERC20 stranded = new MockERC20("Stranded", "STR");
+        stranded.mint(address(executor), 123);
+
+        vm.prank(address(0xCAFE));
+        vm.expectRevert(abi.encodeWithSelector(FlashArbExecutorBase.Unauthorized.selector));
+        executor.recoverToken(address(stranded), profitRecipient, 123);
     }
 }

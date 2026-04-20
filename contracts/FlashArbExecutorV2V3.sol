@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-import {IAjnaPoolLike, IERC20Like, ISwapRouterLike} from "./FlashArbExecutor.sol";
+import {
+    FlashArbExecutorBase,
+    IAjnaPoolLike,
+    IERC20Like,
+    ISwapRouterLike
+} from "./FlashArbExecutorBase.sol";
 
 interface IUniswapV2Callee {
     function uniswapV2Call(address sender, uint256 amount0, uint256 amount1, bytes calldata data) external;
@@ -23,20 +28,9 @@ interface IUniswapV2PairLike {
 /// @dev Authentication in the V2 callback: (1) msg.sender is a canonical factory pair,
 /// (2) msg.sender equals `activeFlashPair`, (3) `sender == address(this)` (V2 passes
 /// the swap() caller), (4) keccak256(data) equals `activeCallbackHash`.
-contract FlashArbExecutorV2V3 is IUniswapV2Callee {
-    error Unauthorized();
-    error UnauthorizedCallback();
-    error ActiveFlashExecution();
-    error InvalidAddress();
-    error InvalidConfig();
-    error InvalidParams();
+contract FlashArbExecutorV2V3 is FlashArbExecutorBase, IUniswapV2Callee {
     error InvalidFlashPair();
     error InvalidFactoryPair();
-    error InvalidBorrowBalance();
-    error InvalidQuoteAmount();
-    error InvalidSwapPath();
-    error UnsupportedBorrowToken();
-    error InsufficientRepayment();
 
     // Uniswap V2 swap-fee constants. The protocol takes a 0.30% fee on every swap,
     // so a flash-loan of `x` AJNA must be repaid with `ceil(x * 1000 / 997)`.
@@ -53,18 +47,9 @@ contract FlashArbExecutorV2V3 is IUniswapV2Callee {
         address profitRecipient;
     }
 
-    address public immutable ajnaToken;
-    address public immutable swapRouter;
     address public immutable uniswapV2Factory;
-    address public immutable owner;
 
     address private activeFlashPair;
-    bytes32 private activeCallbackHash;
-    uint256 private preFlashAjnaBalance;
-    // Load-bearing for TWO invariants: (1) `nonReentrant` modifier guard,
-    // (2) `_isFlashActive()` gate that blocks `recoverToken` during execution.
-    // Any refactor that changes this variable's lifecycle must preserve both.
-    bool private flashExecutionActive;
 
     event FlashArbExecuted(
         address indexed flashPair,
@@ -74,36 +59,14 @@ contract FlashArbExecutorV2V3 is IUniswapV2Callee {
         uint256 repaidAjna,
         uint256 profitAjna
     );
-    event TokenRecovered(address indexed token, address indexed to, uint256 amount);
-
-    modifier onlyOwner() {
-        if (msg.sender != owner) revert Unauthorized();
-        _;
-    }
-
-    /// @dev Reuses `flashExecutionActive` as a reentrancy guard. Prevents the owner
-    /// (or any contract the owner routes through) from invoking `executeFlashArb`
-    /// recursively while a flash is in progress.
-    modifier nonReentrant() {
-        if (flashExecutionActive) revert ActiveFlashExecution();
-        flashExecutionActive = true;
-        _;
-        flashExecutionActive = false;
-    }
 
     constructor(
         address ajnaToken_,
         address swapRouter_,
         address uniswapV2Factory_
-    ) {
-        if (ajnaToken_ == address(0) || swapRouter_ == address(0) || uniswapV2Factory_ == address(0)) {
-            revert InvalidAddress();
-        }
-
-        ajnaToken = ajnaToken_;
-        swapRouter = swapRouter_;
+    ) FlashArbExecutorBase(ajnaToken_, swapRouter_) {
+        if (uniswapV2Factory_ == address(0)) revert InvalidAddress();
         uniswapV2Factory = uniswapV2Factory_;
-        owner = msg.sender;
     }
 
     /// @notice Initiate a V2-flash → Ajna takeReserves → V3-swap → repay+profit cycle.
@@ -220,17 +183,6 @@ contract FlashArbExecutorV2V3 is IUniswapV2Callee {
         );
     }
 
-    /// @notice Sweep any token held by this contract to a recipient. Intended for
-    /// recovering dust, blacklisted tokens, or funds stuck after a partial-fill
-    /// edge case. Blocked during an active flash execution.
-    function recoverToken(address token, address to, uint256 amount) external onlyOwner {
-        if (_isFlashActive()) revert ActiveFlashExecution();
-        if (token == address(0) || to == address(0)) revert InvalidAddress();
-
-        _transferToken(token, to, amount);
-        emit TokenRecovered(token, to, amount);
-    }
-
     function isCanonicalFactoryPair(address flashPair) external view returns (bool) {
         return _isCanonicalFactoryPair(flashPair);
     }
@@ -268,31 +220,6 @@ contract FlashArbExecutorV2V3 is IUniswapV2Callee {
         if (tokenIn != expectedOutputToken) revert InvalidSwapPath();
     }
 
-    function _approveExact(address token, address spender, uint256 amount) internal {
-        _safeTokenCall(token, abi.encodeWithSelector(IERC20Like.approve.selector, spender, uint256(0)));
-        _safeTokenCall(token, abi.encodeWithSelector(IERC20Like.approve.selector, spender, amount));
-    }
-
-    function _transferToken(address token, address to, uint256 amount) internal {
-        _safeTokenCall(token, abi.encodeWithSelector(IERC20Like.transfer.selector, to, amount));
-    }
-
-    // Safe ERC20 call: accepts both standard (returns bool) and non-standard
-    // (returns nothing, e.g. USDT) tokens. Revert reasons from the token are
-    // preserved via assembly-level bubble-up; otherwise reverts InvalidAddress.
-    function _safeTokenCall(address token, bytes memory data) private {
-        (bool success, bytes memory returnData) = token.call(data);
-        if (!success) {
-            if (returnData.length > 0) {
-                assembly {
-                    revert(add(returnData, 32), mload(returnData))
-                }
-            }
-            revert InvalidAddress();
-        }
-        if (returnData.length > 0 && !abi.decode(returnData, (bool))) revert InvalidAddress();
-    }
-
     function _validateParams(ExecuteParams calldata params) internal pure {
         if (
             params.flashPair == address(0) ||
@@ -313,10 +240,6 @@ contract FlashArbExecutorV2V3 is IUniswapV2Callee {
     function _calculateRepayAmount(uint256 borrowAmount) internal pure returns (uint256) {
         return (borrowAmount * UNISWAP_V2_FEE_DENOMINATOR + UNISWAP_V2_FEE_NUMERATOR - 1)
             / UNISWAP_V2_FEE_NUMERATOR;
-    }
-
-    function _isFlashActive() internal view returns (bool) {
-        return flashExecutionActive;
     }
 
     function _readPathAddress(bytes memory path, uint256 start) internal pure returns (address addr) {
