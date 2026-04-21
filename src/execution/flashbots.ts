@@ -62,6 +62,16 @@ function isReceiptNotFoundError(error: unknown): boolean {
   return getErrorMessage(error).toLowerCase().includes("receipt");
 }
 
+// The write-path probe submits `txs: ["0x00"]` to `eth_sendBundle` as a
+// deliberately malformed payload. The relay is expected to reject it, and we
+// match a set of rejection phrases to confirm the request reached bundle
+// validation (which proves auth + transport are alive). The set is evolved
+// empirically — Flashbots controls the exact error wording, and they change
+// it. Any new phrase must represent a rejection that can ONLY fire after
+// authentication succeeds (e.g., tx-decoder errors, bundle-param validation).
+// Do NOT add phrases that could match pre-auth failures (e.g., "invalid
+// signature", "unauthorized", "forbidden", "rate limit") — those must keep
+// aborting the preflight.
 function isExpectedSendBundleProbeError(error: unknown): boolean {
   const message = getErrorMessage(error).toLowerCase();
   return [
@@ -73,6 +83,7 @@ function isExpectedSendBundleProbeError(error: unknown): boolean {
     "unable to parse",
     "unable to decode",
     "malformed",
+    "incorrect request",
   ].some((fragment) => message.includes(fragment));
 }
 

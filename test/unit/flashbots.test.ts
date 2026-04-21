@@ -306,6 +306,83 @@ describe("flashbots submitter", () => {
     expect(sendProbeBody.params[0].txs).toEqual(["0x00"]);
   });
 
+  it("accepts 'incorrect request' as a valid write-path probe rejection", async () => {
+    // Regression guard: the Flashbots relay has been observed returning
+    // `"incorrect request"` instead of a classic `"unable to decode"` when
+    // rejecting the probe's deliberately-malformed `txs: ["0x00"]` payload.
+    // Because the phrase can only fire AFTER authentication succeeds, treating
+    // it as probe-success is safe — a real auth/unreachability failure surfaces
+    // with distinct phrasing (`"invalid flashbots signature"`, HTTP 403, etc.)
+    // that does not match any entry in `isExpectedSendBundleProbeError`.
+    mockFetch
+      .mockResolvedValueOnce(makeResponse({ result: { results: [{}] } }))
+      .mockResolvedValueOnce(
+        makeResponse({ error: { message: "incorrect request" } }),
+      );
+
+    const walletClient = {
+      account: {
+        address: "0x2222222222222222222222222222222222222222",
+        signTransaction: vi.fn().mockResolvedValue(SERIALIZED_TX_1),
+      },
+      prepareTransactionRequest: vi.fn().mockResolvedValue({
+        to: "0x2222222222222222222222222222222222222222",
+        data: "0x",
+        type: "eip1559",
+      }),
+    };
+
+    const submitter = createFlashbotsSubmitter(
+      {
+        chain: mainnet,
+        getBlockNumber: vi.fn().mockResolvedValue(100n),
+      } as never,
+      walletClient as never,
+      AUTH_KEY,
+    );
+
+    await expect(
+      submitter.preflightLiveSubmissionReadiness?.(),
+    ).resolves.toBe(true);
+  });
+
+  it("continues to reject genuine auth failures during the write-path probe", async () => {
+    // Regression guard for the opposite direction: the probe must NOT accept
+    // failures that precede bundle validation (auth, rate-limit, forbidden).
+    // If any of these phrases ever match `isExpectedSendBundleProbeError`,
+    // the keeper could falsely report a broken endpoint as healthy.
+    mockFetch
+      .mockResolvedValueOnce(makeResponse({ result: { results: [{}] } }))
+      .mockResolvedValueOnce(
+        makeResponse({ error: { message: "invalid flashbots signature" } }),
+      );
+
+    const walletClient = {
+      account: {
+        address: "0x2222222222222222222222222222222222222222",
+        signTransaction: vi.fn().mockResolvedValue(SERIALIZED_TX_1),
+      },
+      prepareTransactionRequest: vi.fn().mockResolvedValue({
+        to: "0x2222222222222222222222222222222222222222",
+        data: "0x",
+        type: "eip1559",
+      }),
+    };
+
+    const submitter = createFlashbotsSubmitter(
+      {
+        chain: mainnet,
+        getBlockNumber: vi.fn().mockResolvedValue(100n),
+      } as never,
+      walletClient as never,
+      AUTH_KEY,
+    );
+
+    await expect(
+      submitter.preflightLiveSubmissionReadiness?.(),
+    ).resolves.toBe(false);
+  });
+
   it("revalidates the send path after the cached write-path check expires", async () => {
     let nowMs = 0;
     mockFetch
