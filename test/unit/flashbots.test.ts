@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { keccak256 } from "viem";
+import { keccak256, toHex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { mainnet } from "viem/chains";
 import { createFlashbotsSubmitter } from "../../src/execution/flashbots.js";
@@ -879,5 +879,59 @@ describe("flashbots submitter", () => {
     expect(mockFetch).toHaveBeenCalledTimes(2);
     expect(walletClient.prepareTransactionRequest).toHaveBeenCalledTimes(1);
     expect(walletClient.account.signTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  it("signs relay payloads using EIP-191 over the hex string of keccak256(body), matching the Flashbots spec", async () => {
+    // Regression guard: Flashbots rejects signatures (HTTP 403, -32025 "invalid
+    // flashbots signature") when the auth payload is signed over the 32 raw
+    // bytes of the body hash instead of the 66-char hex string representation.
+    // This test independently recomputes the expected signature and asserts the
+    // exact X-Flashbots-Signature header value — so a future refactor that
+    // flips `{ message: hash }` back to `{ message: { raw: hash } }` (or
+    // similar) fails here rather than silently in live preflight.
+    mockFetch.mockResolvedValueOnce(makeResponse({ result: { results: [{}] } }));
+
+    const walletClient = {
+      account: {
+        address: "0x2222222222222222222222222222222222222222",
+        signTransaction: vi.fn().mockResolvedValue(SERIALIZED_TX_1),
+      },
+      prepareTransactionRequest: vi.fn().mockResolvedValue({
+        to: "0x2222222222222222222222222222222222222222",
+        data: "0x",
+        type: "eip1559",
+      }),
+    };
+
+    const submitter = createFlashbotsSubmitter(
+      {
+        chain: mainnet,
+        getBlockNumber: vi.fn().mockResolvedValue(100n),
+      } as never,
+      walletClient as never,
+      AUTH_KEY,
+      { readPathRevalidationIntervalMs: 60_000, writePathRevalidationIntervalMs: 60_000 },
+    );
+
+    // Only simulate probe runs; write-path is cached healthy from a prior run? No —
+    // fresh submitter, so isHealthy would also try the write path. Avoid that by
+    // using the simpler simulate-only path via a preflight call that stops at
+    // simulate (simulate returns success; then it proceeds to sendBundle probe).
+    // Instead, grab the simulate request body by just calling the callback shape
+    // we know runs first — simpler: trigger isHealthy and read mock call [0].
+    mockFetch.mockResolvedValueOnce(
+      makeResponse({ error: { message: "unable to decode txs" } }),
+    );
+    await submitter.isHealthy();
+
+    const simulateRequest = mockFetch.mock.calls[0][1];
+    const body = simulateRequest.body as string;
+    const header = simulateRequest.headers["X-Flashbots-Signature"] as string;
+
+    const authAccount = privateKeyToAccount(AUTH_KEY);
+    const hash = keccak256(toHex(body));
+    const expectedSignature = await authAccount.signMessage({ message: hash });
+
+    expect(header).toBe(`${authAccount.address}:${expectedSignature}`);
   });
 });

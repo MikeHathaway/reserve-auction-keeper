@@ -119,8 +119,14 @@ export function createFlashbotsSubmitter(
   const authAccount = privateKeyToAccount(flashbotsAuthKey);
 
   async function signFlashbotsPayload(body: string): Promise<string> {
+    // Flashbots expects EIP-191 signature over the HEX STRING form of the body
+    // hash (66 chars incl. "0x" prefix), matching ethers.js's canonical pattern
+    // `wallet.signMessage(ethers.id(body))`. Do NOT use `{ raw: hash }` here —
+    // that would sign the 32 raw bytes with prefix "\n32" instead of the hex
+    // string with prefix "\n66", and the relay rejects it as "invalid flashbots
+    // signature" (HTTP 403, JSON-RPC error -32025).
     const hash = keccak256(toHex(body));
-    const signature = await authAccount.signMessage({ message: { raw: hash } });
+    const signature = await authAccount.signMessage({ message: hash });
     return `${authAccount.address}:${signature}`;
   }
 
