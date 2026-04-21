@@ -2,7 +2,7 @@
 pragma solidity ^0.8.26;
 
 import {FlashArbExecutorV2V3} from "../FlashArbExecutorV2V3.sol";
-import {IAjnaPoolLike, IERC20Like} from "../FlashArbExecutor.sol";
+import {IAjnaPoolLike, IERC20Like} from "../FlashArbExecutorBase.sol";
 import {TestBase} from "./TestBase.sol";
 
 interface IPoolInfoUtilsLikeBase {

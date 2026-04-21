@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-import {IERC20Like, ISwapRouterLike} from "../../FlashArbExecutor.sol";
+import {IERC20Like, ISwapRouterLike} from "../../FlashArbExecutorBase.sol";
 
 contract MockSwapRouter is ISwapRouterLike {
     address public immutable quoteToken;

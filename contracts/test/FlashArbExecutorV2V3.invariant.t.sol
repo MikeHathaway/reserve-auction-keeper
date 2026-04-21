@@ -8,6 +8,10 @@ import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockSwapRouter} from "./mocks/MockSwapRouter.sol";
 import {MockUniswapV2Factory} from "./mocks/MockUniswapV2Factory.sol";
 import {MockUniswapV2Pair} from "./mocks/MockUniswapV2Pair.sol";
+import {
+    MockUnderdeliveringUniswapV2Factory,
+    MockUnderdeliveringUniswapV2Pair
+} from "./mocks/MockUnderdeliveringUniswapV2Pair.sol";
 
 contract UnauthorizedFlashArbActorV2V3 {
     function tryUnauthorizedExecute(
@@ -66,6 +70,12 @@ contract FlashArbExecutorV2V3Handler {
     FlashArbExecutorV2V3 internal executor;
     UnauthorizedFlashArbActorV2V3 internal attacker;
 
+    MockUnderdeliveringUniswapV2Factory internal underdeliveringFactory;
+    MockUnderdeliveringUniswapV2Pair internal underdeliveringPair;
+    FlashArbExecutorV2V3 internal underdeliveringExecutor;
+    uint256 internal underdeliveringPreSeededBalance;
+    uint256 internal constant UNDERDELIVERY_SHORTFALL = 1 * WAD;
+
     address internal constant PROFIT_RECIPIENT = address(0xBEEF);
 
     uint256 internal immutable quoteTokenScale;
@@ -111,6 +121,21 @@ contract FlashArbExecutorV2V3Handler {
         ajna.mint(address(router), 1_000_000_000 * WAD);
 
         expectedFlashPairBalance = ajna.balanceOf(address(flashPair));
+
+        underdeliveringFactory = new MockUnderdeliveringUniswapV2Factory();
+        underdeliveringExecutor = new FlashArbExecutorV2V3(
+            address(ajna),
+            address(router),
+            address(underdeliveringFactory)
+        );
+        underdeliveringPair = MockUnderdeliveringUniswapV2Pair(
+            underdeliveringFactory.createUnderdeliveringPair(
+                address(ajna),
+                address(quote),
+                UNDERDELIVERY_SHORTFALL
+            )
+        );
+        ajna.mint(address(underdeliveringPair), 1_000_000_000 * WAD);
     }
 
     function executeScenario(
@@ -203,6 +228,39 @@ contract FlashArbExecutorV2V3Handler {
         );
         require(!success, "unauthorized direct callback succeeded");
         _assertSnapshotUnchanged(before);
+    }
+
+    function attemptUnderdeliveringExecute(
+        uint96 normalizedQuoteSeed,
+        uint96 profitSeed,
+        uint96 preseededAjnaSeed
+    ) external {
+        uint256 preseededAjna = _bound(preseededAjnaSeed, 1, MAX_PRESEEDED);
+        ajna.mint(address(underdeliveringExecutor), preseededAjna);
+        underdeliveringPreSeededBalance += preseededAjna;
+
+        FlashArbExecutorV2V3.ExecuteParams memory params = _buildParams(
+            normalizedQuoteSeed,
+            profitSeed
+        );
+        params.flashPair = address(underdeliveringPair);
+        router.setNextAmountOut(params.minAjnaOut);
+
+        bool reverted;
+        try underdeliveringExecutor.executeFlashArb(params) {
+            reverted = false;
+        } catch {
+            reverted = true;
+        }
+        require(reverted, "under-delivery call must revert");
+    }
+
+    function underdeliveringExecutorBalance() external view returns (uint256) {
+        return ajna.balanceOf(address(underdeliveringExecutor));
+    }
+
+    function expectedUnderdeliveringBalance() external view returns (uint256) {
+        return underdeliveringPreSeededBalance;
     }
 
     function profitRecipientBalance() external view returns (uint256) {
@@ -325,11 +383,12 @@ contract FlashArbExecutorV2V3InvariantTest is InvariantBase {
         handlers.push(handler);
         targetContract(address(handler));
 
-        bytes4[] memory selectors = new bytes4[](4);
+        bytes4[] memory selectors = new bytes4[](5);
         selectors[0] = handler.executeScenario.selector;
         selectors[1] = handler.attemptUnauthorizedExecute.selector;
         selectors[2] = handler.attemptUnauthorizedPairCallback.selector;
         selectors[3] = handler.attemptUnauthorizedDirectCallback.selector;
+        selectors[4] = handler.attemptUnderdeliveringExecute.selector;
         targetSelector(FuzzSelector({
             addr: address(handler),
             selectors: selectors
@@ -376,6 +435,17 @@ contract FlashArbExecutorV2V3InvariantTest is InvariantBase {
                 handler.flashPairBalance(),
                 handler.expectedFlashPairAjnaBalance(),
                 "flash pair should keep principal and accrue exactly the configured fee"
+            );
+        }
+    }
+
+    function invariant_underdeliveryCannotDrainExecutor() public view {
+        for (uint256 i = 0; i < handlers.length; i++) {
+            FlashArbExecutorV2V3Handler handler = handlers[i];
+            assertEq(
+                handler.underdeliveringExecutorBalance(),
+                handler.expectedUnderdeliveringBalance(),
+                "under-delivering pair must never drain pre-seeded AJNA from its executor"
             );
         }
     }
