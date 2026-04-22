@@ -68,7 +68,11 @@ const ERC20_BALANCE_ABI = [
 ] as const;
 
 interface FlashArbStrategyConfig {
-  maxSlippagePercent: number;
+  // Slippage haircut applied to the DEX-quoted AJNA output to derive the
+  // `minAjnaOut` parameter passed to the executor. Not a candidate-rejection
+  // gate — routes are selected purely on profitability. Protects against
+  // quote-vs-execution drift and sandwich extraction within this window.
+  onChainSlippageFloorPercent: number;
   minLiquidityUsd: number;
   minProfitUsd: number;
   dryRun: boolean;
@@ -170,7 +174,7 @@ export function createFlashArbStrategy(
   }
 
   function getSlippageBps(): bigint {
-    return BigInt(Math.floor(config.maxSlippagePercent * 100));
+    return BigInt(Math.floor(config.onChainSlippageFloorPercent * 100));
   }
 
   function calculateV3FlashFee(borrowAmount: bigint, feePpm: bigint): bigint {
@@ -489,9 +493,6 @@ export function createFlashArbStrategy(
     if (nextCandidate.minAjnaOut !== currentBest.minAjnaOut) {
       return nextCandidate.minAjnaOut > currentBest.minAjnaOut;
     }
-    if (nextCandidate.oracleDivergencePercent !== currentBest.oracleDivergencePercent) {
-      return nextCandidate.oracleDivergencePercent < currentBest.oracleDivergencePercent;
-    }
     if (nextCandidate.hopCount !== currentBest.hopCount) {
       return nextCandidate.hopCount < currentBest.hopCount;
     }
@@ -593,6 +594,15 @@ export function createFlashArbStrategy(
         const estimatedProfitUsd =
           Number(formatEther(estimatedProfitAjna)) * prices.ajnaPriceUsd;
         if (estimatedProfitUsd < config.minProfitUsd) {
+          logger.debug("Flash-arb candidate rejected below minimum USD profit", {
+            chain: ctx.chainName,
+            pool: ctx.poolState.pool,
+            sourceProtocol: source.protocol,
+            swapProtocol: swapRoute.protocol,
+            estimatedProfitAjna: formatEther(estimatedProfitAjna),
+            estimatedProfitUsd: estimatedProfitUsd.toFixed(4),
+            minProfitUsd: config.minProfitUsd,
+          });
           continue;
         }
 
@@ -706,6 +716,21 @@ export function createFlashArbStrategy(
 
         const minAjnaOut = applySlippageFloor(quotedRoute.quote.amountOut);
         if (minAjnaOut <= requiredProfitAjna) {
+          const gapAjna = requiredProfitAjna - minAjnaOut;
+          const executableRatioPercent = requiredProfitAjna > 0n
+            ? Number((minAjnaOut * 10_000n) / requiredProfitAjna) / 100
+            : 0;
+          logger.debug("Flash-arb kick candidate rejected below required profit floor", {
+            chain: ctx.chainName,
+            pool: ctx.poolState.pool,
+            sourceProtocol: source.protocol,
+            swapProtocol: swapRoute.protocol,
+            minAjnaOut: formatEther(minAjnaOut),
+            requiredProfitAjna: formatEther(requiredProfitAjna),
+            gapAjna: formatEther(gapAjna),
+            executableRatioPercent: executableRatioPercent.toFixed(2),
+            oracleDivergencePercent: quotedRoute.quote.oracleDivergencePercent.toFixed(2),
+          });
           continue;
         }
 
@@ -738,12 +763,26 @@ export function createFlashArbStrategy(
         const repayAmount = sourceState.protocol === "uniswap-v2"
           ? calculateUniswapV2RepayAmount(borrowAmount)
           : borrowAmount + calculateV3FlashFee(borrowAmount, sourceState.poolIdentity.fee);
+        // Defensive: calculateMaxV{2,3}BorrowAmount already enforces
+        // repay(borrow) <= minAjnaOut - requiredProfitAjna, so this branch
+        // should be unreachable. Kept as belt-and-suspenders against future
+        // changes to the borrow-sizing math.
         if (minAjnaOut <= repayAmount) {
           continue;
         }
 
         const estimatedProfitAjna = minAjnaOut - repayAmount;
         if (estimatedProfitAjna < requiredProfitAjna) {
+          logger.debug("Flash-arb kick candidate rejected below required profit floor after repayment", {
+            chain: ctx.chainName,
+            pool: ctx.poolState.pool,
+            sourceProtocol: source.protocol,
+            swapProtocol: swapRoute.protocol,
+            borrowAmount: formatEther(borrowAmount),
+            repayAmount: formatEther(repayAmount),
+            estimatedProfitAjna: formatEther(estimatedProfitAjna),
+            requiredProfitAjna: formatEther(requiredProfitAjna),
+          });
           continue;
         }
         const estimatedProfitUsd = Math.max(
@@ -784,6 +823,13 @@ export function createFlashArbStrategy(
   async function evaluateActiveCandidate(ctx: AuctionContext): Promise<FlashArbCandidate | null> {
     return memoizeActiveCandidate(ctx, async () => {
       if (!ctx.poolState.hasActiveAuction || ctx.auctionPrice === 0n) {
+        return null;
+      }
+
+      // Mirrors the kick-path guard: without a valid AJNA oracle price, oracle-
+      // divergence computes to NaN (idealAmountOut = quoteAmount × priceUsd / 0 =
+      // Infinity) and corrupts candidate ranking. Skip the tick entirely.
+      if (!Number.isFinite(ctx.prices.ajnaPriceUsd) || ctx.prices.ajnaPriceUsd <= 0) {
         return null;
       }
 
@@ -941,7 +987,7 @@ export function createFlashArbStrategy(
         oracleDivergencePercent: candidate.oracleDivergencePercent.toFixed(2),
         routeGasEstimate: candidate.routeGasEstimate.toString(),
         additionalExecutionGasUnits: candidate.additionalExecutionGasUnits.toString(),
-        onChainSlippageFloorPercent: config.maxSlippagePercent,
+        onChainSlippageFloorPercent: config.onChainSlippageFloorPercent,
         minLiquidityUsd: config.minLiquidityUsd,
         dryRun: config.dryRun,
       });

@@ -257,7 +257,7 @@ function makeConfig(): AppConfig {
       autoApprove: false,
     },
     flashArb: {
-      maxSlippagePercent: 1,
+      onChainSlippageFloorPercent: 1,
       minLiquidityUsd: 10,
       minProfitUsd: 1,
       routes: {},

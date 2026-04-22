@@ -90,7 +90,7 @@ const configFileSchema = z.object({
     .optional(),
   flashArb: z
     .object({
-      maxSlippagePercent: z.number().min(0).max(100).default(1),
+      onChainSlippageFloorPercent: z.number().min(0).max(100).default(1),
       minLiquidityUsd: z.number().min(0).default(100),
       minProfitUsd: z.number().min(0).default(0),
       executorAddress: addressSchema.optional(),
@@ -151,7 +151,7 @@ export interface AppConfig {
     autoApprove: boolean;
   };
   flashArb: {
-    maxSlippagePercent: number;
+    onChainSlippageFloorPercent: number;
     minLiquidityUsd: number;
     minProfitUsd: number;
     executorAddress?: Address;
@@ -575,7 +575,7 @@ export function loadConfig(configPath: string): AppConfig {
 
   const funded = parsed.funded || { targetExitPriceUsd: 0.1, autoApprove: false };
   const flashArb = parsed.flashArb || {
-    maxSlippagePercent: 1,
+    onChainSlippageFloorPercent: 1,
     minLiquidityUsd: 100,
     minProfitUsd: 0,
     routes: {},
@@ -606,7 +606,7 @@ export function loadConfig(configPath: string): AppConfig {
       autoApprove: funded.autoApprove,
     },
     flashArb: {
-      maxSlippagePercent: flashArb.maxSlippagePercent,
+      onChainSlippageFloorPercent: flashArb.onChainSlippageFloorPercent,
       minLiquidityUsd: flashArb.minLiquidityUsd,
       minProfitUsd: flashArb.minProfitUsd,
       executorAddress: flashArb.executorAddress as Address | undefined,

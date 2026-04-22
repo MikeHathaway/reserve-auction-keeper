@@ -28,7 +28,7 @@
     "autoApprove": false
   },
   "flashArb": {
-    "maxSlippagePercent": 1,
+    "onChainSlippageFloorPercent": 1,
     "minLiquidityUsd": 100,
     "minProfitUsd": 5,
     "routes": {

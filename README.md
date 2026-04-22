@@ -89,7 +89,7 @@ FLASHBOTS_AUTH_KEY_FILE=./secrets/flashbots-auth.key
     "autoApprove": false
   },
   "flashArb": {
-    "maxSlippagePercent": 1,
+    "onChainSlippageFloorPercent": 1,
     "minLiquidityUsd": 100,
     "minProfitUsd": 5,
     "routes": {
@@ -247,7 +247,7 @@ Flash-arb now supports multiple execution families and chooses the best executab
 - `v3v2`: Uniswap V3 flash source -> Ajna `takeReserves()` -> Uniswap V2 swap
 
 - `strategy: "flash-arb"` uses the matching on-chain executor contract for the selected family
-- `flashArb.maxSlippagePercent`, `flashArb.minLiquidityUsd`, and `flashArb.minProfitUsd` gate candidate selection before execution
+- `flashArb.onChainSlippageFloorPercent` sets the haircut applied to quoted AJNA output to derive `minAjnaOut` for the executor (protects against quote-vs-execution drift and sandwich extraction); `flashArb.minLiquidityUsd` and `flashArb.minProfitUsd` gate candidate selection before execution
 - reserve-auction kicks now use a conservative pre-kick EV estimate; for flash-arb, set `flashArb.minProfitUsd > 0` if you want the keeper to pay gas to start auctions
 - `flashArb.routes.<chain>.sources.<symbol>[]` declares AJNA-containing flash sources, each tagged as `uniswap-v2` or `uniswap-v3`
 - `flashArb.routes.<chain>.swapRoutes.<symbol>[]` declares quote-token -> AJNA swap routes, each tagged as `uniswap-v2` or `uniswap-v3`
@@ -300,7 +300,7 @@ If you already have a custom RPC URL for the target network, set `DEPLOY_RPC_URL
 | `chains.<chain>.quoteTokens.<symbol>.coingeckoId` | unset | Required for new tokens when `pricing.provider` is `coingecko` or `hybrid`; optional in `alchemy` mode |
 | `funded.targetExitPriceUsd` | `0.10` | Minimum USD value of quote tokens received per AJNA spent |
 | `funded.autoApprove` | `false` | Auto-approve AJNA spending for pools |
-| `flashArb.maxSlippagePercent` | `1` | Slippage tolerance applied to quoted AJNA output before execution |
+| `flashArb.onChainSlippageFloorPercent` | `1` | Haircut % applied to DEX-quoted AJNA output to derive `minAjnaOut` enforced on-chain. Protects against quote-vs-execution drift and sandwich extraction within this window. Not a candidate-rejection gate. |
 | `flashArb.minLiquidityUsd` | `100` | Minimum quote-token liquidity required before evaluating a flash-arb |
 | `flashArb.minProfitUsd` | `0` | Minimum conservative USD profit after flash fee + slippage floor. Set above `0` to allow flash-arb reserve-auction kicks under the conservative pre-kick EV gate |
 | `flashArb.executorAddress` | unset | Optional legacy/default `v3v3` executor address used when a chain route does not override it |

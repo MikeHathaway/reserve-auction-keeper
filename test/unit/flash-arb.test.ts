@@ -4,6 +4,7 @@ import { createFlashArbStrategy } from "../../src/strategies/flash-arb.js";
 import type { MevSubmitter } from "../../src/execution/mev-submitter.js";
 import { BASE_CONFIG } from "../../src/chains/index.js";
 import type { AuctionContext } from "../../src/strategies/interface.js";
+import { logger } from "../../src/utils/logger.js";
 
 const WALLET_ADDRESS = "0x3333333333333333333333333333333333333333";
 const EXECUTOR_V3V3 = "0x4444444444444444444444444444444444444444";
@@ -217,7 +218,7 @@ function makeStrategy({
     walletClient as never,
     submitter,
     {
-      maxSlippagePercent: 1,
+      onChainSlippageFloorPercent: 1,
       minLiquidityUsd: 10,
       minProfitUsd: 0.1,
       ajnaToken: BASE_CONFIG.ajnaToken,
@@ -549,7 +550,7 @@ describe("flash-arb strategy", () => {
       { account: { address: WALLET_ADDRESS } } as never,
       makeSubmitter(),
       {
-        maxSlippagePercent: 1,
+        onChainSlippageFloorPercent: 1,
         minLiquidityUsd: 10,
         minProfitUsd: 0.1,
         ajnaToken: BASE_CONFIG.ajnaToken,
@@ -562,7 +563,11 @@ describe("flash-arb strategy", () => {
     const firstCtx = makeContext();
     await expect(strategy.canExecute(firstCtx)).resolves.toBe(true);
 
-    quotedAmountOut = parseEther("50");
+    // Drop quoted AJNA well below repayAmount so the second ctx is unambiguously
+    // rejected on profitability (minAjnaOut < repayAmount). A value close to the
+    // repay threshold would pass-or-fail based on floor/fee rounding and drift
+    // silently if constants change.
+    quotedAmountOut = parseEther("10");
     const secondCtx = makeContext();
     await expect(strategy.canExecute(secondCtx)).resolves.toBe(false);
 
@@ -570,6 +575,34 @@ describe("flash-arb strategy", () => {
       call.address === QUOTER_ADDRESS && call.functionName === "quoteExactInput"
     );
     expect(quoterCalls).toHaveLength(2);
+  });
+
+  it("accepts profitable candidates whose oracle divergence exceeds the on-chain slippage floor config", async () => {
+    // With ctx defaults: quoteTokenPriceUsd=1, ajnaPriceUsd=0.2, quoteAmount=25 → idealAmountOut=125 AJNA.
+    // A quoted 60 AJNA gives oracleDivergencePercent ≈ 52%, well above onChainSlippageFloorPercent=1.
+    // borrowAmount = 25 × 2 = 50, repayAmount ≈ 50.15, minAjnaOut = 60 × 0.99 = 59.4 → profitable.
+    // Pre-refactor, the slippage hard gate would have rejected this before profitability check.
+    const { strategy } = makeStrategy({ v3QuotedAmountOut: parseEther("60") });
+    await expect(strategy.canExecute(makeContext())).resolves.toBe(true);
+  });
+
+  it("logs gapAjna and executableRatioPercent when a candidate falls short of repayAmount", async () => {
+    // Quoted 40 AJNA → minAjnaOut = 39.6 < repayAmount ≈ 50.15 → rejection branch fires.
+    const debugSpy = vi.spyOn(logger, "debug");
+    try {
+      const { strategy } = makeStrategy({ v3QuotedAmountOut: parseEther("40") });
+      await expect(strategy.canExecute(makeContext())).resolves.toBe(false);
+      expect(debugSpy).toHaveBeenCalledWith(
+        "Flash-arb candidate rejected after repayment and slippage floor",
+        expect.objectContaining({
+          gapAjna: expect.stringMatching(/^\d+(\.\d+)?$/),
+          executableRatioPercent: expect.stringMatching(/^\d+\.\d{2}$/),
+          oracleDivergencePercent: expect.stringMatching(/^\d+\.\d{2}$/),
+        }),
+      );
+    } finally {
+      debugSpy.mockRestore();
+    }
   });
 
   it("estimateKickProfit returns the best mixed-family profit estimate when the route remains viable", async () => {
@@ -639,6 +672,58 @@ describe("flash-arb strategy", () => {
       prices: makeContext().prices,
       chainName: "base",
     })).resolves.toBe(0);
+  });
+
+  it("logs gapAjna and executableRatioPercent when a kick candidate falls short of the profit floor", async () => {
+    // Kickable context: no live auction price → selectBestFutureKickCandidate path.
+    // Default minProfitUsd=0.1 / ajnaPriceUsd=0.2 → requiredProfitAjna = 0.5 AJNA.
+    // Quoted 0.3 AJNA → minAjnaOut = 0.297 < 0.5 → rejection branch fires.
+    const debugSpy = vi.spyOn(logger, "debug");
+    try {
+      const { strategy } = makeStrategy({ v3QuotedAmountOut: parseEther("0.3") });
+      const kickCtx = {
+        poolState: {
+          ...makeContext().poolState,
+          auctionPrice: 0n,
+          timeRemaining: 0n,
+          hasActiveAuction: false,
+          isKickable: true,
+        },
+        prices: makeContext().prices,
+        chainName: "base",
+        gasPriceWei: 5_000_000_000n,
+      };
+      await expect(strategy.estimateKickProfit!(kickCtx)).resolves.toBe(0);
+      const match = debugSpy.mock.calls.find(([msg]) =>
+        typeof msg === "string" && msg.includes("kick candidate rejected below required profit floor"),
+      );
+      expect(match).toBeDefined();
+      expect(match![1]).toEqual(
+        expect.objectContaining({
+          gapAjna: expect.stringMatching(/^\d+(\.\d+)?$/),
+          executableRatioPercent: expect.stringMatching(/^\d+\.\d{2}$/),
+          oracleDivergencePercent: expect.stringMatching(/^\d+\.\d{2}$/),
+        }),
+      );
+    } finally {
+      debugSpy.mockRestore();
+    }
+  });
+
+  it("skips the active-auction evaluation when ajnaPriceUsd is zero or non-finite", async () => {
+    // Kick path already had this guard; mirror it on the active path so NaN
+    // divergence doesn't propagate into candidate ranking.
+    const { strategy } = makeStrategy();
+    await expect(
+      strategy.canExecute(makeContext({
+        prices: {
+          ajnaPriceUsd: 0,
+          quoteTokenPriceUsd: 1,
+          source: "coingecko" as const,
+          isStale: false,
+        },
+      })),
+    ).resolves.toBe(false);
   });
 
   it("reuses inspected source state across pools sharing a flash source within a tick", async () => {
@@ -741,7 +826,7 @@ function createStrategyWithProfitFloor(route: ReturnType<typeof makeRoute>, minP
     { account: { address: WALLET_ADDRESS } } as never,
     makeSubmitter(),
     {
-      maxSlippagePercent: 1,
+      onChainSlippageFloorPercent: 1,
       minLiquidityUsd: 10,
       minProfitUsd,
       ajnaToken: BASE_CONFIG.ajnaToken,

@@ -236,7 +236,7 @@ function createStrategy(
     const route = getFlashArbRoute(resolved, config);
 
     return createFlashArbStrategy(publicClient, walletClient, submitter, {
-      maxSlippagePercent: config.flashArb.maxSlippagePercent,
+      onChainSlippageFloorPercent: config.flashArb.onChainSlippageFloorPercent,
       minLiquidityUsd: config.flashArb.minLiquidityUsd,
       minProfitUsd: config.flashArb.minProfitUsd,
       ajnaToken: resolved.chainConfig.ajnaToken,

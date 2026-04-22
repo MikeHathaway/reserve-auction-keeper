@@ -2,6 +2,7 @@ import "dotenv/config";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
+import { createEphemeralFoundryRpcConfig } from "./foundry-rpc-config.mjs";
 import { createRestrictedChildEnv } from "./child-process-env.mjs";
 
 const TEST_DIR = join(process.cwd(), "contracts", "test");
@@ -57,29 +58,39 @@ if (tests.length === 0) {
 
 const rpcUrl = resolveMainnetRpcUrl();
 const forkBlock = process.env.MAINNET_FORK_BLOCK || DEFAULT_MAINNET_FORK_BLOCK;
+// absolutePaths: see run-base-fork-tests.mjs for rationale.
+const { configPath, cleanup } = createEphemeralFoundryRpcConfig("mainnet", rpcUrl, {
+  absolutePaths: true,
+});
 let exitCode = 0;
 
-for (const testFile of tests) {
-  const result = spawnSync(
-    "forge",
-    [
-      "test",
-      "--match-path",
-      testFile,
-      "--fork-url",
-      "mainnet",
-      "--fork-block-number",
-      forkBlock,
-    ],
-    {
-      stdio: "inherit",
-      env: createRestrictedChildEnv({ MAINNET_RPC_URL: rpcUrl }),
-    },
-  );
-  if (result.status !== 0) {
-    exitCode = result.status ?? 1;
-    break;
+try {
+  for (const testFile of tests) {
+    const result = spawnSync(
+      "forge",
+      [
+        "test",
+        "--config-path",
+        configPath,
+        "--match-path",
+        testFile,
+        "--fork-url",
+        "mainnet",
+        "--fork-block-number",
+        forkBlock,
+      ],
+      {
+        stdio: "inherit",
+        env: createRestrictedChildEnv(),
+      },
+    );
+    if (result.status !== 0) {
+      exitCode = result.status ?? 1;
+      break;
+    }
   }
+} finally {
+  cleanup();
 }
 
 if (exitCode !== 0) {

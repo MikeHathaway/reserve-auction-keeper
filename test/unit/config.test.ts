@@ -682,7 +682,7 @@ describe("config", () => {
       },
       strategy: "flash-arb",
       flashArb: {
-        maxSlippagePercent: 0.5,
+        onChainSlippageFloorPercent: 0.5,
         minLiquidityUsd: 250,
         minProfitUsd: 5,
         executorAddress: "0x1234567890123456789012345678901234567890",
@@ -704,7 +704,7 @@ describe("config", () => {
     const config = loadConfig(CONFIG_FILE);
     expect(config.strategy).toBe("flash-arb");
     expect(config.flashArb).toMatchObject({
-      maxSlippagePercent: 0.5,
+      onChainSlippageFloorPercent: 0.5,
       minLiquidityUsd: 250,
       minProfitUsd: 5,
       executorAddress: "0x1234567890123456789012345678901234567890",

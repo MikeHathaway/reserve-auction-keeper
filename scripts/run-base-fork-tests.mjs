@@ -2,6 +2,7 @@ import "dotenv/config";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
+import { createEphemeralFoundryRpcConfig } from "./foundry-rpc-config.mjs";
 import { createRestrictedChildEnv } from "./child-process-env.mjs";
 
 const TEST_DIR = join(process.cwd(), "contracts", "test");
@@ -53,29 +54,43 @@ if (tests.length === 0) {
 
 const rpcUrl = resolveBaseRpcUrl();
 const forkBlock = process.env.BASE_FORK_BLOCK || DEFAULT_BASE_FORK_BLOCK;
+// absolutePaths: the config lives in /tmp, so src/test/out/libs get rewritten to
+// absolute paths anchored at the real project root. Without this, forge resolves
+// `src = "contracts"` relative to the config's tmpdir and silently finds no sources.
+// The URL stays in the config file (mode 0o600) and off the child env, keeping it
+// out of /proc/<forge>/environ and out of reach of Foundry's vm.envString cheatcode.
+const { configPath, cleanup } = createEphemeralFoundryRpcConfig("base", rpcUrl, {
+  absolutePaths: true,
+});
 let exitCode = 0;
 
-for (const testFile of tests) {
-  const result = spawnSync(
-    "forge",
-    [
-      "test",
-      "--match-path",
-      testFile,
-      "--fork-url",
-      "base",
-      "--fork-block-number",
-      forkBlock,
-    ],
-    {
-      stdio: "inherit",
-      env: createRestrictedChildEnv({ BASE_RPC_URL: rpcUrl }),
-    },
-  );
-  if (result.status !== 0) {
-    exitCode = result.status ?? 1;
-    break;
+try {
+  for (const testFile of tests) {
+    const result = spawnSync(
+      "forge",
+      [
+        "test",
+        "--config-path",
+        configPath,
+        "--match-path",
+        testFile,
+        "--fork-url",
+        "base",
+        "--fork-block-number",
+        forkBlock,
+      ],
+      {
+        stdio: "inherit",
+        env: createRestrictedChildEnv(),
+      },
+    );
+    if (result.status !== 0) {
+      exitCode = result.status ?? 1;
+      break;
+    }
   }
+} finally {
+  cleanup();
 }
 
 if (exitCode !== 0) {
