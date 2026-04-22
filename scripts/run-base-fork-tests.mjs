@@ -2,7 +2,6 @@ import "dotenv/config";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { createEphemeralFoundryRpcConfig } from "./foundry-rpc-config.mjs";
 import { createRestrictedChildEnv } from "./child-process-env.mjs";
 
 const TEST_DIR = join(process.cwd(), "contracts", "test");
@@ -54,36 +53,29 @@ if (tests.length === 0) {
 
 const rpcUrl = resolveBaseRpcUrl();
 const forkBlock = process.env.BASE_FORK_BLOCK || DEFAULT_BASE_FORK_BLOCK;
-const { configPath, cleanup } = createEphemeralFoundryRpcConfig("base", rpcUrl);
 let exitCode = 0;
 
-try {
-  for (const testFile of tests) {
-    const result = spawnSync(
-      "forge",
-      [
-        "test",
-        "--config-path",
-        configPath,
-        "--match-path",
-        testFile,
-        "--fork-url",
-        "base",
-        "--fork-block-number",
-        forkBlock,
-      ],
-      {
-        stdio: "inherit",
-        env: createRestrictedChildEnv(),
-      },
-    );
-    if (result.status !== 0) {
-      exitCode = result.status ?? 1;
-      break;
-    }
+for (const testFile of tests) {
+  const result = spawnSync(
+    "forge",
+    [
+      "test",
+      "--match-path",
+      testFile,
+      "--fork-url",
+      "base",
+      "--fork-block-number",
+      forkBlock,
+    ],
+    {
+      stdio: "inherit",
+      env: createRestrictedChildEnv({ BASE_RPC_URL: rpcUrl }),
+    },
+  );
+  if (result.status !== 0) {
+    exitCode = result.status ?? 1;
+    break;
   }
-} finally {
-  cleanup();
 }
 
 if (exitCode !== 0) {

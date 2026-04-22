@@ -90,7 +90,7 @@ interface FlashArbCandidate {
   quotedAjnaOut: bigint;
   estimatedProfitUsd: number;
   liquidityUsd: number;
-  slippagePercent: number;
+  oracleDivergencePercent: number;
   hopCount: number;
   routeGasEstimate: bigint;
   additionalExecutionGasUnits: bigint;
@@ -489,8 +489,8 @@ export function createFlashArbStrategy(
     if (nextCandidate.minAjnaOut !== currentBest.minAjnaOut) {
       return nextCandidate.minAjnaOut > currentBest.minAjnaOut;
     }
-    if (nextCandidate.slippagePercent !== currentBest.slippagePercent) {
-      return nextCandidate.slippagePercent < currentBest.slippagePercent;
+    if (nextCandidate.oracleDivergencePercent !== currentBest.oracleDivergencePercent) {
+      return nextCandidate.oracleDivergencePercent < currentBest.oracleDivergencePercent;
     }
     if (nextCandidate.hopCount !== currentBest.hopCount) {
       return nextCandidate.hopCount < currentBest.hopCount;
@@ -565,23 +565,15 @@ export function createFlashArbStrategy(
         const quotedRoute = await swapQuotePromise;
         if (!quotedRoute) continue;
 
-        if (quotedRoute.quote.slippagePercent > config.maxSlippagePercent) {
-          logger.debug("Flash-arb candidate rejected for slippage", {
-            chain: ctx.chainName,
-            pool: ctx.poolState.pool,
-            sourceProtocol: source.protocol,
-            swapProtocol: swapRoute.protocol,
-            slippagePercent: quotedRoute.quote.slippagePercent.toFixed(2),
-            maxSlippagePercent: config.maxSlippagePercent,
-          });
-          continue;
-        }
-
         const repayAmount = sourceState.protocol === "uniswap-v2"
           ? calculateUniswapV2RepayAmount(borrowAmount)
           : borrowAmount + calculateV3FlashFee(borrowAmount, sourceState.poolIdentity.fee);
         const minAjnaOut = applySlippageFloor(quotedRoute.quote.amountOut);
         if (minAjnaOut <= repayAmount) {
+          const gapAjna = repayAmount - minAjnaOut;
+          const executableRatioPercent = repayAmount > 0n
+            ? Number((minAjnaOut * 10_000n) / repayAmount) / 100
+            : 0;
           logger.debug("Flash-arb candidate rejected after repayment and slippage floor", {
             chain: ctx.chainName,
             pool: ctx.poolState.pool,
@@ -590,6 +582,9 @@ export function createFlashArbStrategy(
             borrowAmount: formatEther(borrowAmount),
             repayAmount: formatEther(repayAmount),
             minAjnaOut: formatEther(minAjnaOut),
+            gapAjna: formatEther(gapAjna),
+            executableRatioPercent: executableRatioPercent.toFixed(2),
+            oracleDivergencePercent: quotedRoute.quote.oracleDivergencePercent.toFixed(2),
           });
           continue;
         }
@@ -614,7 +609,7 @@ export function createFlashArbStrategy(
           quotedAjnaOut: quotedRoute.quote.amountOut,
           estimatedProfitUsd,
           liquidityUsd,
-          slippagePercent: quotedRoute.quote.slippagePercent,
+          oracleDivergencePercent: quotedRoute.quote.oracleDivergencePercent,
           hopCount: quotedRoute.hopCount,
           routeGasEstimate: quotedRoute.quote.gasEstimate,
           additionalExecutionGasUnits:
@@ -709,10 +704,6 @@ export function createFlashArbStrategy(
         const quotedRoute = await swapQuotePromise;
         if (!quotedRoute) continue;
 
-        if (quotedRoute.quote.slippagePercent > config.maxSlippagePercent) {
-          continue;
-        }
-
         const minAjnaOut = applySlippageFloor(quotedRoute.quote.amountOut);
         if (minAjnaOut <= requiredProfitAjna) {
           continue;
@@ -773,7 +764,7 @@ export function createFlashArbStrategy(
           quotedAjnaOut: quotedRoute.quote.amountOut,
           estimatedProfitUsd,
           liquidityUsd,
-          slippagePercent: quotedRoute.quote.slippagePercent,
+          oracleDivergencePercent: quotedRoute.quote.oracleDivergencePercent,
           hopCount: quotedRoute.hopCount,
           routeGasEstimate: quotedRoute.quote.gasEstimate,
           additionalExecutionGasUnits:
@@ -947,10 +938,10 @@ export function createFlashArbStrategy(
         swapProtocol: candidate.swapProtocol,
         estimatedProfitUsd: candidate.estimatedProfitUsd.toFixed(4),
         liquidityUsd: candidate.liquidityUsd.toFixed(2),
-        slippagePercent: candidate.slippagePercent.toFixed(2),
+        oracleDivergencePercent: candidate.oracleDivergencePercent.toFixed(2),
         routeGasEstimate: candidate.routeGasEstimate.toString(),
         additionalExecutionGasUnits: candidate.additionalExecutionGasUnits.toString(),
-        maxSlippagePercent: config.maxSlippagePercent,
+        onChainSlippageFloorPercent: config.maxSlippagePercent,
         minLiquidityUsd: config.minLiquidityUsd,
         dryRun: config.dryRun,
       });

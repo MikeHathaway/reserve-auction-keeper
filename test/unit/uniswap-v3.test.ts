@@ -3,7 +3,7 @@ import { parseEther } from "viem";
 import { createUniswapV3DexQuoter } from "../../src/pricing/uniswap-v3.js";
 
 describe("uniswap v3 dex quoter", () => {
-  it("quotes quote-token to AJNA output and computes slippage", async () => {
+  it("quotes quote-token to AJNA output and computes oracle divergence", async () => {
     const publicClient = {
       readContract: vi.fn().mockResolvedValue([
         parseEther("12"),
@@ -39,7 +39,7 @@ describe("uniswap v3 dex quoter", () => {
         args: ["0x010203", 25_000_000n],
       }),
     );
-    expect(result?.slippagePercent).toBeCloseTo(4, 6);
+    expect(result?.oracleDivergencePercent).toBeCloseTo(4, 6);
   });
 
   it("converts Ajna internal quote amounts to raw token units before quoting", async () => {
