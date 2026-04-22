@@ -714,16 +714,18 @@ describe("flash-arb strategy", () => {
     // Kick path already had this guard; mirror it on the active path so NaN
     // divergence doesn't propagate into candidate ranking.
     const { strategy } = makeStrategy();
-    await expect(
-      strategy.canExecute(makeContext({
-        prices: {
-          ajnaPriceUsd: 0,
-          quoteTokenPriceUsd: 1,
-          source: "coingecko" as const,
-          isStale: false,
-        },
-      })),
-    ).resolves.toBe(false);
+    for (const badPrice of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      await expect(
+        strategy.canExecute(makeContext({
+          prices: {
+            ajnaPriceUsd: badPrice,
+            quoteTokenPriceUsd: 1,
+            source: "coingecko" as const,
+            isStale: false,
+          },
+        })),
+      ).resolves.toBe(false);
+    }
   });
 
   it("reuses inspected source state across pools sharing a flash source within a tick", async () => {

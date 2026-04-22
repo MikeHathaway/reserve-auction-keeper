@@ -867,7 +867,11 @@ export function createFlashArbStrategy(
 
   async function evaluateKickCandidate(ctx: KickContext): Promise<FlashArbCandidate | null> {
     return memoizeKickCandidate(ctx, async () => {
-      if (config.minProfitUsd <= 0 || ctx.prices.ajnaPriceUsd <= 0) {
+      if (
+        config.minProfitUsd <= 0 ||
+        !Number.isFinite(ctx.prices.ajnaPriceUsd) ||
+        ctx.prices.ajnaPriceUsd <= 0
+      ) {
         return null;
       }
 

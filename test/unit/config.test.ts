@@ -736,6 +736,22 @@ describe("config", () => {
     });
   });
 
+  it("rejects the legacy flashArb.maxSlippagePercent key so stale configs fail loudly", () => {
+    writeConfig({
+      chains: {
+        base: { enabled: true, rpcUrl: "https://base-rpc.example.com" },
+      },
+      strategy: "flash-arb",
+      flashArb: {
+        maxSlippagePercent: 5,
+        minLiquidityUsd: 100,
+        minProfitUsd: 0,
+      },
+    });
+
+    expect(() => loadConfig(CONFIG_FILE)).toThrow(/maxSlippagePercent/);
+  });
+
   it("normalizes flash-arb route symbols to uppercase", () => {
     writeConfig({
       chains: {

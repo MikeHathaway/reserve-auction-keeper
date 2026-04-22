@@ -104,6 +104,9 @@ const configFileSchema = z.object({
         })
         .optional(),
     })
+    // Strict so legacy keys (e.g., the renamed `maxSlippagePercent`) surface as
+    // a loud parse error rather than silently falling back to the default.
+    .strict()
     .optional(),
   polling: z
     .object({
