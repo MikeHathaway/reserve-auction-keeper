@@ -16,7 +16,11 @@
     "mainnet": {
       "enabled": false,
       "rpcUrl": "https://eth-mainnet.g.alchemy.com/v2/your_key",
-      "pools": []
+      "pools": [],
+      "strategy": "flash-arb",
+      "flashArb": {
+        "minProfitUsd": 50
+      }
     }
   },
   "pricing": {

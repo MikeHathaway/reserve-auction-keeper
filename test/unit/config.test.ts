@@ -752,6 +752,123 @@ describe("config", () => {
     expect(() => loadConfig(CONFIG_FILE)).toThrow(/maxSlippagePercent/);
   });
 
+  it("resolves per-chain strategy overrides over the top-level default", () => {
+    const MAINNET_USDC = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
+    const MAINNET_AJNA = "0x9a96ec9B57Fb64FbC60B423d1f4da7691Bd35079";
+    writeConfig({
+      chains: {
+        base: { enabled: true, rpcUrl: "https://base-rpc.example.com" },
+        mainnet: {
+          enabled: true,
+          rpcUrl: "https://mainnet-rpc.example.com",
+          strategy: "flash-arb",
+        },
+      },
+      strategy: "funded",
+      funded: { targetExitPriceUsd: 0.1 },
+      flashArb: {
+        executorAddress: "0x1234567890123456789012345678901234567890",
+        routes: {
+          mainnet: {
+            quoterAddress: "0x1111111111111111111111111111111111111111",
+            flashLoanPools: { USDC: "0x2222222222222222222222222222222222222222" },
+            quoteToAjnaPaths: {
+              USDC: encodeUniswapV3Path(MAINNET_USDC, 500, MAINNET_AJNA),
+            },
+          },
+        },
+      },
+    });
+
+    const config = loadConfig(CONFIG_FILE);
+    const base = config.chains.find((c) => c.chainConfig.name === "base")!;
+    const mainnet = config.chains.find((c) => c.chainConfig.name === "mainnet")!;
+    expect(base.strategy).toBe("funded");
+    expect(mainnet.strategy).toBe("flash-arb");
+  });
+
+  it("falls back to the global strategy when a chain omits its own override", () => {
+    writeConfig({
+      chains: {
+        base: { enabled: true, rpcUrl: "https://base-rpc.example.com" },
+      },
+      strategy: "funded",
+      funded: { targetExitPriceUsd: 0.1 },
+    });
+
+    const config = loadConfig(CONFIG_FILE);
+    expect(config.chains[0].strategy).toBe("funded");
+  });
+
+  it("merges per-chain flashArb overrides on top of the global flashArb block", () => {
+    const MAINNET_USDC = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
+    const MAINNET_AJNA = "0x9a96ec9B57Fb64FbC60B423d1f4da7691Bd35079";
+    const BASE_USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+    writeConfig({
+      chains: {
+        base: {
+          enabled: true,
+          rpcUrl: "https://base-rpc.example.com",
+          strategy: "flash-arb",
+        },
+        mainnet: {
+          enabled: true,
+          rpcUrl: "https://mainnet-rpc.example.com",
+          strategy: "flash-arb",
+          // Mainnet gas costs 10-50x Base; raise the profit floor for mainnet only.
+          flashArb: { minProfitUsd: 50 },
+        },
+      },
+      strategy: "flash-arb",
+      flashArb: {
+        minProfitUsd: 5,
+        minLiquidityUsd: 100,
+        executorAddress: "0x1234567890123456789012345678901234567890",
+        routes: {
+          base: {
+            quoterAddress: "0x1111111111111111111111111111111111111111",
+            flashLoanPools: { USDC: "0x2222222222222222222222222222222222222222" },
+            quoteToAjnaPaths: {
+              USDC: encodeUniswapV3Path(BASE_USDC, 500, BASE_CONFIG.ajnaToken),
+            },
+          },
+          mainnet: {
+            quoterAddress: "0x1111111111111111111111111111111111111111",
+            flashLoanPools: { USDC: "0x2222222222222222222222222222222222222222" },
+            quoteToAjnaPaths: {
+              USDC: encodeUniswapV3Path(MAINNET_USDC, 500, MAINNET_AJNA),
+            },
+          },
+        },
+      },
+    });
+
+    const config = loadConfig(CONFIG_FILE);
+    const base = config.chains.find((c) => c.chainConfig.name === "base")!;
+    const mainnet = config.chains.find((c) => c.chainConfig.name === "mainnet")!;
+    expect(base.flashArb.minProfitUsd).toBe(5);
+    expect(mainnet.flashArb.minProfitUsd).toBe(50);
+    // Unspecified fields inherit from the global block.
+    expect(mainnet.flashArb.minLiquidityUsd).toBe(100);
+  });
+
+  it("rejects a typo'd key in a per-chain flashArb override (strict mode)", () => {
+    writeConfig({
+      chains: {
+        base: {
+          enabled: true,
+          rpcUrl: "https://base-rpc.example.com",
+          strategy: "flash-arb",
+          flashArb: { maxSlippagePercent: 0.5 },
+        },
+      },
+      strategy: "funded",
+      funded: { targetExitPriceUsd: 0.1 },
+    });
+
+    expect(() => loadConfig(CONFIG_FILE)).toThrow(/maxSlippagePercent/);
+  });
+
   it("normalizes flash-arb route symbols to uppercase", () => {
     writeConfig({
       chains: {

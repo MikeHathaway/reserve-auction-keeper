@@ -2,6 +2,7 @@ import { z } from "zod";
 import { readFileSync } from "node:fs";
 import { isAddress, type Address, type Hex } from "viem";
 import { CHAIN_CONFIGS, buildRpcUrl, type ChainConfig, type RpcProvider } from "./chains/index.js";
+import { logger } from "./utils/logger.js";
 import {
   loadOptionalHexSecret,
   loadOptionalStringSecret,
@@ -58,6 +59,26 @@ const flashArbRouteSchema = z.object({
   swapRoutes: z.record(z.string(), z.array(flashArbSwapRouteSchema).min(1)).optional(),
 });
 
+// Per-chain override blocks: same fields as the top-level `flashArb` / `funded`
+// blocks, all optional. `.strict()` so typos (e.g., the legacy
+// `maxSlippagePercent` key) fail loudly rather than silently falling back to
+// the top-level value.
+const chainFlashArbOverrideSchema = z
+  .object({
+    onChainSlippageFloorPercent: z.number().min(0).max(100).optional(),
+    minLiquidityUsd: z.number().min(0).optional(),
+    minProfitUsd: z.number().min(0).optional(),
+  })
+  .strict();
+
+const chainFundedOverrideSchema = z
+  .object({
+    targetExitPriceUsd: z.number().positive("Target exit price must be positive").optional(),
+    maxTakeAmount: z.string().optional(),
+    autoApprove: z.boolean().optional(),
+  })
+  .strict();
+
 const chainConfigSchema = z.object({
   enabled: z.boolean().default(true),
   rpcUrl: z.string().url("RPC URL must be a valid URL").optional(),
@@ -65,6 +86,14 @@ const chainConfigSchema = z.object({
   privateRpcTrusted: z.boolean().default(false),
   pools: z.array(addressSchema).default([]),
   quoteTokens: z.record(z.string().min(1), quoteTokenOverrideSchema).default({}),
+  // Optional per-chain strategy selector. If unset, falls back to the top-level
+  // `strategy` field. Lets the operator run, e.g., flash-arb on mainnet and
+  // funded on base from a single keeper process.
+  strategy: z.enum(["funded", "flash-arb"]).optional(),
+  // Optional per-chain overrides that merge on top of the global strategy
+  // config. Only the fields you want to vary per chain need to appear.
+  flashArb: chainFlashArbOverrideSchema.optional(),
+  funded: chainFundedOverrideSchema.optional(),
 });
 
 const configFileSchema = z.object({
@@ -140,6 +169,20 @@ export interface ResolvedChainConfig {
   privateRpcUrl?: string;
   privateRpcTrusted: boolean;
   pools: Address[];
+  // Effective strategy for this chain. Per-chain override wins over top-level.
+  strategy: "funded" | "flash-arb";
+  // Pre-merged strategy configs. Read from these instead of the top-level
+  // AppConfig.{flashArb,funded} so per-chain overrides are respected.
+  flashArb: {
+    onChainSlippageFloorPercent: number;
+    minLiquidityUsd: number;
+    minProfitUsd: number;
+  };
+  funded: {
+    targetExitPriceUsd: number;
+    maxTakeAmount?: bigint;
+    autoApprove: boolean;
+  };
 }
 
 export interface AppConfig {
@@ -539,6 +582,23 @@ export function loadConfig(configPath: string): AppConfig {
   const pricing = { provider: (parsed.pricing?.provider ?? "coingecko") as PriceProvider };
   const secrets = loadEnvSecrets(pricing.provider);
 
+  // Resolve top-level strategy config FIRST so per-chain overrides can merge
+  // onto fully-defaulted values.
+  const fundedGlobal = parsed.funded
+    ? {
+        targetExitPriceUsd: parsed.funded.targetExitPriceUsd,
+        maxTakeAmount: parsed.funded.maxTakeAmount
+          ? BigInt(parsed.funded.maxTakeAmount)
+          : undefined,
+        autoApprove: parsed.funded.autoApprove,
+      }
+    : { targetExitPriceUsd: 0.1, maxTakeAmount: undefined, autoApprove: false };
+  const flashArbGlobal = {
+    onChainSlippageFloorPercent: parsed.flashArb?.onChainSlippageFloorPercent ?? 1,
+    minLiquidityUsd: parsed.flashArb?.minLiquidityUsd ?? 100,
+    minProfitUsd: parsed.flashArb?.minProfitUsd ?? 0,
+  };
+
   const chains: ResolvedChainConfig[] = [];
 
   for (const [name, chainFileConfig] of Object.entries(parsed.chains) as Array<
@@ -563,12 +623,48 @@ export function loadConfig(configPath: string): AppConfig {
 
     const privateRpcUrl = chainFileConfig.privateRpcUrl;
 
+    const strategy = chainFileConfig.strategy ?? parsed.strategy;
+    const chainFlashArb = {
+      onChainSlippageFloorPercent:
+        chainFileConfig.flashArb?.onChainSlippageFloorPercent
+          ?? flashArbGlobal.onChainSlippageFloorPercent,
+      minLiquidityUsd:
+        chainFileConfig.flashArb?.minLiquidityUsd ?? flashArbGlobal.minLiquidityUsd,
+      minProfitUsd:
+        chainFileConfig.flashArb?.minProfitUsd ?? flashArbGlobal.minProfitUsd,
+    };
+    const chainFunded = {
+      targetExitPriceUsd:
+        chainFileConfig.funded?.targetExitPriceUsd ?? fundedGlobal.targetExitPriceUsd,
+      maxTakeAmount: chainFileConfig.funded?.maxTakeAmount
+        ? BigInt(chainFileConfig.funded.maxTakeAmount)
+        : fundedGlobal.maxTakeAmount,
+      autoApprove: chainFileConfig.funded?.autoApprove ?? fundedGlobal.autoApprove,
+    };
+
+    // Dead-config warning: override block exists for a strategy this chain
+    // isn't using. Likely a forgotten stale config after a strategy flip; warn
+    // instead of rejecting so operators can flip back without editing both.
+    if (strategy === "funded" && chainFileConfig.flashArb) {
+      logger.warn(
+        `chains.${name}.flashArb overrides present but strategy is "funded" — the overrides will be ignored.`,
+      );
+    }
+    if (strategy === "flash-arb" && chainFileConfig.funded) {
+      logger.warn(
+        `chains.${name}.funded overrides present but strategy is "flash-arb" — the overrides will be ignored.`,
+      );
+    }
+
     chains.push({
       chainConfig: resolvedChainConfig,
       rpcUrl,
       privateRpcUrl,
       privateRpcTrusted: chainFileConfig.privateRpcTrusted ?? false,
       pools: (chainFileConfig.pools || []) as Address[],
+      strategy,
+      flashArb: chainFlashArb,
+      funded: chainFunded,
     });
   }
 
@@ -576,43 +672,33 @@ export function loadConfig(configPath: string): AppConfig {
     throw new Error("No chains enabled in config. Enable at least one chain.");
   }
 
-  const funded = parsed.funded || { targetExitPriceUsd: 0.1, autoApprove: false };
-  const flashArb = parsed.flashArb || {
-    onChainSlippageFloorPercent: 1,
-    minLiquidityUsd: 100,
-    minProfitUsd: 0,
-    routes: {},
-  };
   const polling = parsed.polling || {
     idleIntervalMs: 60_000,
     activeIntervalMs: 10_000,
     profitabilityThreshold: 0.2,
   };
   const flashArbRoutes = normalizeFlashArbRouteMaps({
-    mainnet: flashArb.routes?.mainnet,
-    base: flashArb.routes?.base,
-    arbitrum: flashArb.routes?.arbitrum,
-    optimism: flashArb.routes?.optimism,
-    polygon: flashArb.routes?.polygon,
-  }, flashArb.executorAddress as Address | undefined);
-  if (parsed.strategy === "flash-arb") {
-    validateEnabledFlashArbRoutes(chains, flashArbRoutes);
+    mainnet: parsed.flashArb?.routes?.mainnet,
+    base: parsed.flashArb?.routes?.base,
+    arbitrum: parsed.flashArb?.routes?.arbitrum,
+    optimism: parsed.flashArb?.routes?.optimism,
+    polygon: parsed.flashArb?.routes?.polygon,
+  }, parsed.flashArb?.executorAddress as Address | undefined);
+  // Validate routes only for chains whose resolved strategy is flash-arb. A
+  // chain running funded can leave its flashArb route empty.
+  const flashArbChains = chains.filter((c) => c.strategy === "flash-arb");
+  if (flashArbChains.length > 0) {
+    validateEnabledFlashArbRoutes(flashArbChains, flashArbRoutes);
   }
 
   return {
     chains,
     strategy: parsed.strategy,
     pricing,
-    funded: {
-      targetExitPriceUsd: funded.targetExitPriceUsd,
-      maxTakeAmount: funded.maxTakeAmount ? BigInt(funded.maxTakeAmount) : undefined,
-      autoApprove: funded.autoApprove,
-    },
+    funded: fundedGlobal,
     flashArb: {
-      onChainSlippageFloorPercent: flashArb.onChainSlippageFloorPercent,
-      minLiquidityUsd: flashArb.minLiquidityUsd,
-      minProfitUsd: flashArb.minProfitUsd,
-      executorAddress: flashArb.executorAddress as Address | undefined,
+      ...flashArbGlobal,
+      executorAddress: parsed.flashArb?.executorAddress as Address | undefined,
       routes: flashArbRoutes,
     },
     polling,

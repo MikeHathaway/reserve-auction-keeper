@@ -246,6 +246,16 @@ function makeConfig(): AppConfig {
         privateRpcUrl: "http://127.0.0.1:9545",
         privateRpcTrusted: true,
         pools: [],
+        strategy: "funded",
+        flashArb: {
+          onChainSlippageFloorPercent: 1,
+          minLiquidityUsd: 10,
+          minProfitUsd: 1,
+        },
+        funded: {
+          targetExitPriceUsd: 0.1,
+          autoApprove: false,
+        },
       },
     ],
     strategy: "funded",

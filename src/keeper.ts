@@ -232,13 +232,13 @@ function createStrategy(
   walletClient: WalletClient,
   submitter: MevSubmitter,
 ): ExecutionStrategy {
-  if (config.strategy === "flash-arb") {
+  if (resolved.strategy === "flash-arb") {
     const route = getFlashArbRoute(resolved, config);
 
     return createFlashArbStrategy(publicClient, walletClient, submitter, {
-      onChainSlippageFloorPercent: config.flashArb.onChainSlippageFloorPercent,
-      minLiquidityUsd: config.flashArb.minLiquidityUsd,
-      minProfitUsd: config.flashArb.minProfitUsd,
+      onChainSlippageFloorPercent: resolved.flashArb.onChainSlippageFloorPercent,
+      minLiquidityUsd: resolved.flashArb.minLiquidityUsd,
+      minProfitUsd: resolved.flashArb.minProfitUsd,
       ajnaToken: resolved.chainConfig.ajnaToken,
       nativeTokenPriceUsd: resolved.chainConfig.nativeTokenPriceUsd,
       dryRun: config.dryRun,
@@ -252,9 +252,9 @@ function createStrategy(
     resolved.chainConfig.ajnaToken,
     submitter,
       {
-        targetExitPriceUsd: config.funded.targetExitPriceUsd,
-        maxTakeAmount: config.funded.maxTakeAmount,
-        autoApprove: config.funded.autoApprove,
+        targetExitPriceUsd: resolved.funded.targetExitPriceUsd,
+        maxTakeAmount: resolved.funded.maxTakeAmount,
+        autoApprove: resolved.funded.autoApprove,
         profitMarginPercent: config.profitMarginPercent,
         dryRun: config.dryRun,
         nativeTokenPriceUsd: resolved.chainConfig.nativeTokenPriceUsd,
@@ -302,7 +302,7 @@ function createChainKeeper(
     );
   }
 
-  if (!config.dryRun && config.strategy === "flash-arb") {
+  if (!config.dryRun && resolved.strategy === "flash-arb") {
     const route = getFlashArbRoute(resolved, config);
 
     if (!route) {
@@ -1254,8 +1254,7 @@ export async function startKeeper(config: AppConfig): Promise<void> {
   setHealthy(true);
   clearAllHealthDependencies();
   logger.info("Starting Ajna Reserve Auction Keeper", {
-    strategy: config.strategy,
-    chains: config.chains.map((c) => c.chainConfig.name),
+    strategies: config.chains.map((c) => `${c.chainConfig.name}:${c.strategy}`),
     dryRun: config.dryRun,
   });
 
