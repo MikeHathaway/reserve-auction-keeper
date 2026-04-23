@@ -72,7 +72,7 @@ export async function quoteUniswapV2Path(
   const idealAmountOut =
     quoteAmount * (prices.quoteTokenPriceUsd / prices.ajnaPriceUsd);
   const actualAmountOut = Number(formatEther(amountOut));
-  const slippagePercent = idealAmountOut > 0
+  const oracleDivergencePercent = idealAmountOut > 0
     ? Math.max(0, ((idealAmountOut - actualAmountOut) / idealAmountOut) * 100)
     : 0;
 
@@ -81,6 +81,6 @@ export async function quoteUniswapV2Path(
     gasEstimate: 100_000n + BigInt(Math.max(0, path.length - 2)) * 50_000n,
     idealAmountOut,
     actualAmountOut,
-    slippagePercent,
+    oracleDivergencePercent,
   };
 }

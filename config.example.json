@@ -16,7 +16,11 @@
     "mainnet": {
       "enabled": false,
       "rpcUrl": "https://eth-mainnet.g.alchemy.com/v2/your_key",
-      "pools": []
+      "pools": [],
+      "strategy": "flash-arb",
+      "flashArb": {
+        "minProfitUsd": 50
+      }
     }
   },
   "pricing": {
@@ -28,11 +32,11 @@
     "autoApprove": false
   },
   "flashArb": {
-    "maxSlippagePercent": 1,
+    "onChainSlippageFloorPercent": 1,
     "minLiquidityUsd": 100,
     "minProfitUsd": 5,
     "routes": {
-      "base": {
+      "mainnet": {
         "quoterAddress": "0x0000000000000000000000000000000000000000",
         "uniswapV2FactoryAddress": "0x0000000000000000000000000000000000000000",
         "executors": {

@@ -88,52 +88,12 @@ FLASHBOTS_AUTH_KEY_FILE=./secrets/flashbots-auth.key
     "targetExitPriceUsd": 0.10,
     "autoApprove": false
   },
-  "flashArb": {
-    "maxSlippagePercent": 1,
-    "minLiquidityUsd": 100,
-    "minProfitUsd": 5,
-    "routes": {
-      "base": {
-        "quoterAddress": "0x0000000000000000000000000000000000000000",
-        "uniswapV2FactoryAddress": "0x0000000000000000000000000000000000000000",
-        "executors": {
-          "v2v3": "0x0000000000000000000000000000000000000000",
-          "v3v2": "0x0000000000000000000000000000000000000000",
-          "v3v3": "0x0000000000000000000000000000000000000000"
-        },
-        "sources": {
-          "USDC": [
-            {
-              "protocol": "uniswap-v2",
-              "address": "0x0000000000000000000000000000000000000000"
-            },
-            {
-              "protocol": "uniswap-v3",
-              "address": "0x0000000000000000000000000000000000000000"
-            }
-          ]
-        },
-        "swapRoutes": {
-          "USDC": [
-            {
-              "protocol": "uniswap-v3",
-              "path": "0x"
-            },
-            {
-              "protocol": "uniswap-v2",
-              "path": [
-                "0x0000000000000000000000000000000000000001",
-                "0x0000000000000000000000000000000000000002"
-              ]
-            }
-          ]
-        }
-      }
-    }
-  },
   "dryRun": true
 }
 ```
+
+The Quick Start shown above runs the **funded** strategy only. If you also want the flash-arb path, add a `flashArb` block with per-chain routes and executors — see the "Strategy: Flash-Arb" subsection below. If you leave `strategy: "funded"` globally and also configure `flashArb.routes.<chain>` for the same chain, the keeper logs a dead-config warning at startup so the stale block doesn't quietly mislead you.
+
 
 `chains.<chain>.quoteTokens` is additive by default. It merges with the chain's built-in quote-token whitelist and can override an existing symbol by reusing the same key. If you point an existing symbol at a different token address in `coingecko` or `hybrid` mode, also provide a new `coingeckoId`.
 
@@ -247,7 +207,7 @@ Flash-arb now supports multiple execution families and chooses the best executab
 - `v3v2`: Uniswap V3 flash source -> Ajna `takeReserves()` -> Uniswap V2 swap
 
 - `strategy: "flash-arb"` uses the matching on-chain executor contract for the selected family
-- `flashArb.maxSlippagePercent`, `flashArb.minLiquidityUsd`, and `flashArb.minProfitUsd` gate candidate selection before execution
+- `flashArb.onChainSlippageFloorPercent` sets the haircut applied to quoted AJNA output to derive `minAjnaOut` for the executor (protects against quote-vs-execution drift and sandwich extraction); `flashArb.minLiquidityUsd` and `flashArb.minProfitUsd` gate candidate selection before execution
 - reserve-auction kicks now use a conservative pre-kick EV estimate; for flash-arb, set `flashArb.minProfitUsd > 0` if you want the keeper to pay gas to start auctions
 - `flashArb.routes.<chain>.sources.<symbol>[]` declares AJNA-containing flash sources, each tagged as `uniswap-v2` or `uniswap-v3`
 - `flashArb.routes.<chain>.swapRoutes.<symbol>[]` declares quote-token -> AJNA swap routes, each tagged as `uniswap-v2` or `uniswap-v3`
@@ -257,6 +217,32 @@ Flash-arb now supports multiple execution families and chooses the best executab
 - `uniswap-v3` swap routes must start with the quote token, end with AJNA/bwAJNA, and avoid reusing a `uniswap-v3` flash source in the same candidate
 - legacy `flashLoanPools`, `quoteToAjnaPaths`, and top-level/default `executorAddress` still normalize into the `v3v3` family so existing configs keep working
 - The runtime path is live, but you should still treat it as advanced/operator-only until fork tests exist for your target chains
+
+### Mixed mode: different strategies per chain
+
+A single keeper process can run different strategies on different chains. Set a per-chain `strategy` override and, if the chain has different economics (gas costs, liquidity), override the strategy-specific fields too:
+
+```json
+{
+  "strategy": "funded",
+  "funded": { "targetExitPriceUsd": 0.10 },
+  "flashArb": { "minProfitUsd": 5, "minLiquidityUsd": 100, "routes": { "mainnet": {...} } },
+  "chains": {
+    "base": { "enabled": true, "rpcUrl": "...", "strategy": "funded" },
+    "mainnet": {
+      "enabled": true,
+      "rpcUrl": "...",
+      "strategy": "flash-arb",
+      "flashArb": { "minProfitUsd": 50 }
+    }
+  }
+}
+```
+
+- Per-chain `strategy` wins over the top-level default. Chains that omit it inherit the global value.
+- Per-chain `flashArb.*` and `funded.*` blocks merge onto the top-level block field by field. Unset fields inherit the global value. Typo'd keys (e.g., the renamed `maxSlippagePercent`) are rejected at config load time.
+- A chain that declares `strategy: "flash-arb"` still sources its route/executor config from the top-level `flashArb.routes.<chain>` block. The per-chain override is for profit/liquidity/slippage thresholds only.
+- If a chain has a `flashArb` override but resolves to `strategy: "funded"` (or vice versa), the keeper logs a warning once at load time and ignores the unused block, so stale config doesn't silently mislead you.
 
 Deploy the executor with:
 
@@ -298,9 +284,12 @@ If you already have a custom RPC URL for the target network, set `DEPLOY_RPC_URL
 | `COINGECKO_API_PLAN` | `auto` | CoinGecko auth mode: `demo`, `pro`, or `auto` host detection |
 | `chains.<chain>.quoteTokens.<symbol>.address` | unset | Adds or overrides a quote token whitelist entry for auto-discovery on that chain |
 | `chains.<chain>.quoteTokens.<symbol>.coingeckoId` | unset | Required for new tokens when `pricing.provider` is `coingecko` or `hybrid`; optional in `alchemy` mode |
+| `chains.<chain>.strategy` | unset | Per-chain override for `strategy`. Lets you run, e.g., `funded` on Base and `flash-arb` on Mainnet from the same keeper |
+| `chains.<chain>.flashArb.*` | unset | Per-chain override of any `flashArb.*` field (`onChainSlippageFloorPercent`, `minLiquidityUsd`, `minProfitUsd`). Merges onto the top-level block |
+| `chains.<chain>.funded.*` | unset | Per-chain override of any `funded.*` field. Merges onto the top-level block |
 | `funded.targetExitPriceUsd` | `0.10` | Minimum USD value of quote tokens received per AJNA spent |
 | `funded.autoApprove` | `false` | Auto-approve AJNA spending for pools |
-| `flashArb.maxSlippagePercent` | `1` | Slippage tolerance applied to quoted AJNA output before execution |
+| `flashArb.onChainSlippageFloorPercent` | `1` | Haircut % applied to DEX-quoted AJNA output to derive `minAjnaOut` enforced on-chain. Protects against quote-vs-execution drift and sandwich extraction within this window. Not a candidate-rejection gate. |
 | `flashArb.minLiquidityUsd` | `100` | Minimum quote-token liquidity required before evaluating a flash-arb |
 | `flashArb.minProfitUsd` | `0` | Minimum conservative USD profit after flash fee + slippage floor. Set above `0` to allow flash-arb reserve-auction kicks under the conservative pre-kick EV gate |
 | `flashArb.executorAddress` | unset | Optional legacy/default `v3v3` executor address used when a chain route does not override it |

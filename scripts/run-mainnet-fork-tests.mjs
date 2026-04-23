@@ -58,7 +58,10 @@ if (tests.length === 0) {
 
 const rpcUrl = resolveMainnetRpcUrl();
 const forkBlock = process.env.MAINNET_FORK_BLOCK || DEFAULT_MAINNET_FORK_BLOCK;
-const { configPath, cleanup } = createEphemeralFoundryRpcConfig("mainnet", rpcUrl);
+// absolutePaths: see run-base-fork-tests.mjs for rationale.
+const { configPath, cleanup } = createEphemeralFoundryRpcConfig("mainnet", rpcUrl, {
+  absolutePaths: true,
+});
 let exitCode = 0;
 
 try {

@@ -27,7 +27,11 @@ export interface DexQuote {
   gasEstimate: bigint;
   idealAmountOut: number;
   actualAmountOut: number;
-  slippagePercent: number;
+  // Percent gap between the oracle-implied fair output and the DEX quote for
+  // the exact `amountInWad` used. Not a price-impact metric and not a function
+  // of auction price — it reflects divergence between the USD oracle and the
+  // pools on this route. Use for diagnostics, not profitability gating.
+  oracleDivergencePercent: number;
 }
 
 export interface DexQuoter {
@@ -89,7 +93,7 @@ export async function quoteUniswapV3Path(
     const idealAmountOut =
       quoteAmount * (prices.quoteTokenPriceUsd / prices.ajnaPriceUsd);
     const actualAmountOut = Number(formatEther(amountOut));
-    const slippagePercent = idealAmountOut > 0
+    const oracleDivergencePercent = idealAmountOut > 0
       ? Math.max(0, ((idealAmountOut - actualAmountOut) / idealAmountOut) * 100)
       : 0;
 
@@ -98,7 +102,7 @@ export async function quoteUniswapV3Path(
       gasEstimate,
       idealAmountOut,
       actualAmountOut,
-      slippagePercent,
+      oracleDivergencePercent,
     };
   } catch (error) {
     logger.warn("Uniswap V3 quote failed", {

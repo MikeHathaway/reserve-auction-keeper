@@ -42,8 +42,7 @@ async function main() {
   })();
 
   logger.info("Config loaded", {
-    chains: config.chains.map((c) => c.chainConfig.name),
-    strategy: config.strategy,
+    strategies: config.chains.map((c) => `${c.chainConfig.name}:${c.strategy}`),
     pricingProvider: config.pricing.provider,
     dryRun: config.dryRun,
   });
