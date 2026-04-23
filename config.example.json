@@ -36,7 +36,7 @@
     "minLiquidityUsd": 100,
     "minProfitUsd": 5,
     "routes": {
-      "base": {
+      "mainnet": {
         "quoterAddress": "0x0000000000000000000000000000000000000000",
         "uniswapV2FactoryAddress": "0x0000000000000000000000000000000000000000",
         "executors": {

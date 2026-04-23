@@ -88,52 +88,12 @@ FLASHBOTS_AUTH_KEY_FILE=./secrets/flashbots-auth.key
     "targetExitPriceUsd": 0.10,
     "autoApprove": false
   },
-  "flashArb": {
-    "onChainSlippageFloorPercent": 1,
-    "minLiquidityUsd": 100,
-    "minProfitUsd": 5,
-    "routes": {
-      "base": {
-        "quoterAddress": "0x0000000000000000000000000000000000000000",
-        "uniswapV2FactoryAddress": "0x0000000000000000000000000000000000000000",
-        "executors": {
-          "v2v3": "0x0000000000000000000000000000000000000000",
-          "v3v2": "0x0000000000000000000000000000000000000000",
-          "v3v3": "0x0000000000000000000000000000000000000000"
-        },
-        "sources": {
-          "USDC": [
-            {
-              "protocol": "uniswap-v2",
-              "address": "0x0000000000000000000000000000000000000000"
-            },
-            {
-              "protocol": "uniswap-v3",
-              "address": "0x0000000000000000000000000000000000000000"
-            }
-          ]
-        },
-        "swapRoutes": {
-          "USDC": [
-            {
-              "protocol": "uniswap-v3",
-              "path": "0x"
-            },
-            {
-              "protocol": "uniswap-v2",
-              "path": [
-                "0x0000000000000000000000000000000000000001",
-                "0x0000000000000000000000000000000000000002"
-              ]
-            }
-          ]
-        }
-      }
-    }
-  },
   "dryRun": true
 }
 ```
+
+The Quick Start shown above runs the **funded** strategy only. If you also want the flash-arb path, add a `flashArb` block with per-chain routes and executors — see the "Strategy: Flash-Arb" subsection below. If you leave `strategy: "funded"` globally and also configure `flashArb.routes.<chain>` for the same chain, the keeper logs a dead-config warning at startup so the stale block doesn't quietly mislead you.
+
 
 `chains.<chain>.quoteTokens` is additive by default. It merges with the chain's built-in quote-token whitelist and can override an existing symbol by reusing the same key. If you point an existing symbol at a different token address in `coingecko` or `hybrid` mode, also provide a new `coingeckoId`.
 

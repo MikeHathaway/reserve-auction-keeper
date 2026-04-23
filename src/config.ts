@@ -71,85 +71,112 @@ const chainFlashArbOverrideSchema = z
   })
   .strict();
 
+// maxTakeAmount is a decimal integer string (parsed via BigInt). Restrict to
+// positive integers so `"0"` (BigInt-falsy, silently treated as "no cap" in
+// funded.ts), negatives (`"-1"` → negative plans), and non-numeric (`"abc"` →
+// BigInt throws at load) all fail cleanly at config parse.
+const maxTakeAmountSchema = z
+  .string()
+  .regex(/^[1-9]\d*$/, "maxTakeAmount must be a positive integer string (wei, no decimals)");
+
 const chainFundedOverrideSchema = z
   .object({
     targetExitPriceUsd: z.number().positive("Target exit price must be positive").optional(),
-    maxTakeAmount: z.string().optional(),
+    maxTakeAmount: maxTakeAmountSchema.optional(),
     autoApprove: z.boolean().optional(),
   })
   .strict();
 
-const chainConfigSchema = z.object({
-  enabled: z.boolean().default(true),
-  rpcUrl: z.string().url("RPC URL must be a valid URL").optional(),
-  privateRpcUrl: z.string().url().optional(),
-  privateRpcTrusted: z.boolean().default(false),
-  pools: z.array(addressSchema).default([]),
-  quoteTokens: z.record(z.string().min(1), quoteTokenOverrideSchema).default({}),
-  // Optional per-chain strategy selector. If unset, falls back to the top-level
-  // `strategy` field. Lets the operator run, e.g., flash-arb on mainnet and
-  // funded on base from a single keeper process.
-  strategy: z.enum(["funded", "flash-arb"]).optional(),
-  // Optional per-chain overrides that merge on top of the global strategy
-  // config. Only the fields you want to vary per chain need to appear.
-  flashArb: chainFlashArbOverrideSchema.optional(),
-  funded: chainFundedOverrideSchema.optional(),
-});
+// Strict throughout: a typo in a per-chain key (e.g. `stratgey` for `strategy`)
+// is silently stripped by default-mode zod and falls back to the global default,
+// so an operator who thinks they configured mainnet flash-arb would actually
+// be running the top-level strategy on both chains. Strict mode makes every
+// misspelling a loud parse error at load.
+const chainConfigSchema = z
+  .object({
+    enabled: z.boolean().default(true),
+    rpcUrl: z.string().url("RPC URL must be a valid URL").optional(),
+    privateRpcUrl: z.string().url().optional(),
+    privateRpcTrusted: z.boolean().default(false),
+    pools: z.array(addressSchema).default([]),
+    quoteTokens: z.record(z.string().min(1), quoteTokenOverrideSchema).default({}),
+    // Optional per-chain strategy selector. If unset, falls back to the top-
+    // level `strategy` field. Lets the operator run, e.g., flash-arb on mainnet
+    // and funded on base from a single keeper process.
+    strategy: z.enum(["funded", "flash-arb"]).optional(),
+    // Optional per-chain overrides that merge on top of the global strategy
+    // config. Only the fields you want to vary per chain need to appear.
+    flashArb: chainFlashArbOverrideSchema.optional(),
+    funded: chainFundedOverrideSchema.optional(),
+  })
+  .strict();
 
-const configFileSchema = z.object({
-  chains: z.object({
-    mainnet: chainConfigSchema.optional(),
-    base: chainConfigSchema.optional(),
-    arbitrum: chainConfigSchema.optional(),
-    optimism: chainConfigSchema.optional(),
-    polygon: chainConfigSchema.optional(),
-  }),
-  pricing: z
-    .object({
-      provider: z.enum(["coingecko", "alchemy", "hybrid"]).default("coingecko"),
-    })
-    .optional(),
-  strategy: z.enum(["funded", "flash-arb"]).default("funded"),
-  funded: z
-    .object({
-      targetExitPriceUsd: z.number().positive("Target exit price must be positive"),
-      maxTakeAmount: z.string().optional(),
-      autoApprove: z.boolean().default(false),
-    })
-    .optional(),
-  flashArb: z
-    .object({
-      onChainSlippageFloorPercent: z.number().min(0).max(100).default(1),
-      minLiquidityUsd: z.number().min(0).default(100),
-      minProfitUsd: z.number().min(0).default(0),
-      executorAddress: addressSchema.optional(),
-      routes: z
-        .object({
-          mainnet: flashArbRouteSchema.optional(),
-          base: flashArbRouteSchema.optional(),
-          arbitrum: flashArbRouteSchema.optional(),
-          optimism: flashArbRouteSchema.optional(),
-          polygon: flashArbRouteSchema.optional(),
-        })
-        .optional(),
-    })
-    // Strict so legacy keys (e.g., the renamed `maxSlippagePercent`) surface as
-    // a loud parse error rather than silently falling back to the default.
-    .strict()
-    .optional(),
-  polling: z
-    .object({
-      idleIntervalMs: z.number().int().positive().default(60_000),
-      activeIntervalMs: z.number().int().positive().default(10_000),
-      profitabilityThreshold: z.number().min(0).max(1).default(0.2),
-    })
-    .optional(),
-  dryRun: z.boolean().default(true),
-  profitMarginPercent: z.number().min(0).default(5),
-  gasPriceCeilingGwei: z.number().positive().default(100),
-  alertWebhookUrl: z.string().url().optional(),
-  healthCheckPort: z.number().int().positive().default(8080),
-});
+const configFileSchema = z
+  .object({
+    chains: z
+      .object({
+        mainnet: chainConfigSchema.optional(),
+        base: chainConfigSchema.optional(),
+        arbitrum: chainConfigSchema.optional(),
+        optimism: chainConfigSchema.optional(),
+        polygon: chainConfigSchema.optional(),
+      })
+      // Strict so a misspelled chain name (`arbitram`, `avalanche`) throws
+      // instead of being silently dropped.
+      .strict(),
+    pricing: z
+      .object({
+        provider: z.enum(["coingecko", "alchemy", "hybrid"]).default("coingecko"),
+      })
+      .optional(),
+    strategy: z.enum(["funded", "flash-arb"]).default("funded"),
+    funded: z
+      .object({
+        targetExitPriceUsd: z.number().positive("Target exit price must be positive"),
+        maxTakeAmount: maxTakeAmountSchema.optional(),
+        autoApprove: z.boolean().default(false),
+      })
+      // Strict to match the sibling `flashArb` block and per-chain override
+      // schemas. Typos like `tatgetExitPriceUsd` would otherwise silently fall
+      // back to the default instead of failing loudly at load time.
+      .strict()
+      .optional(),
+    flashArb: z
+      .object({
+        onChainSlippageFloorPercent: z.number().min(0).max(100).default(1),
+        minLiquidityUsd: z.number().min(0).default(100),
+        minProfitUsd: z.number().min(0).default(0),
+        executorAddress: addressSchema.optional(),
+        routes: z
+          .object({
+            mainnet: flashArbRouteSchema.optional(),
+            base: flashArbRouteSchema.optional(),
+            arbitrum: flashArbRouteSchema.optional(),
+            optimism: flashArbRouteSchema.optional(),
+            polygon: flashArbRouteSchema.optional(),
+          })
+          .optional(),
+      })
+      // Strict so legacy keys (e.g., the renamed `maxSlippagePercent`) surface
+      // as a loud parse error rather than silently falling back to the default.
+      .strict()
+      .optional(),
+    polling: z
+      .object({
+        idleIntervalMs: z.number().int().positive().default(60_000),
+        activeIntervalMs: z.number().int().positive().default(10_000),
+        profitabilityThreshold: z.number().min(0).max(1).default(0.2),
+      })
+      .optional(),
+    dryRun: z.boolean().default(true),
+    profitMarginPercent: z.number().min(0).default(5),
+    gasPriceCeilingGwei: z.number().positive().default(100),
+    alertWebhookUrl: z.string().url().optional(),
+    healthCheckPort: z.number().int().positive().default(8080),
+  })
+  // Strict at the top level too: a typo'd key (`drrunn`, `strategcy`, misplaced
+  // per-chain field at root) throws instead of being silently stripped.
+  .strict();
 
 export type ConfigFile = z.infer<typeof configFileSchema>;
 
@@ -187,19 +214,18 @@ export interface ResolvedChainConfig {
 
 export interface AppConfig {
   chains: ResolvedChainConfig[];
+  // Global strategy default. Used only inside `loadConfig` as the fallback
+  // when a chain omits its own `strategy` override. Not read at runtime;
+  // downstream code reads `ResolvedChainConfig.strategy` per chain instead.
   strategy: "funded" | "flash-arb";
   pricing: {
     provider: PriceProvider;
   };
-  funded: {
-    targetExitPriceUsd: number;
-    maxTakeAmount?: bigint;
-    autoApprove: boolean;
-  };
+  // Flash-arb routes live at the top level because they're genuinely global
+  // (one route map per chain, not per-strategy). Threshold fields
+  // (onChainSlippageFloorPercent, minLiquidityUsd, minProfitUsd) moved to
+  // `ResolvedChainConfig.flashArb` — read them from there, not here.
   flashArb: {
-    onChainSlippageFloorPercent: number;
-    minLiquidityUsd: number;
-    minProfitUsd: number;
     executorAddress?: Address;
     routes: Partial<Record<
       "mainnet" | "base" | "arbitrum" | "optimism" | "polygon",
@@ -691,13 +717,26 @@ export function loadConfig(configPath: string): AppConfig {
     validateEnabledFlashArbRoutes(flashArbChains, flashArbRoutes);
   }
 
+  // Dead-config warning for stale top-level routes: if `flashArb.routes.<chain>`
+  // exists for a chain that resolved to `funded`, the route is never read. Most
+  // common cause is flipping a chain from flash-arb to funded without cleaning
+  // up the route block. Warn instead of rejecting so operators can flip back
+  // without also having to re-paste the route.
+  for (const chain of chains) {
+    if (chain.strategy !== "funded") continue;
+    const chainName = chain.chainConfig.name as ChainName;
+    if (flashArbRoutes[chainName]) {
+      logger.warn(
+        `flashArb.routes.${chainName} is configured but chains.${chainName}.strategy resolves to "funded" — the route will be ignored by the selected strategy.`,
+      );
+    }
+  }
+
   return {
     chains,
     strategy: parsed.strategy,
     pricing,
-    funded: fundedGlobal,
     flashArb: {
-      ...flashArbGlobal,
       executorAddress: parsed.flashArb?.executorAddress as Address | undefined,
       routes: flashArbRoutes,
     },

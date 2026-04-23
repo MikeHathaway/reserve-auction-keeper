@@ -262,14 +262,7 @@ function makeConfig(): AppConfig {
     pricing: {
       provider: "coingecko",
     },
-    funded: {
-      targetExitPriceUsd: 0.1,
-      autoApprove: false,
-    },
     flashArb: {
-      onChainSlippageFloorPercent: 1,
-      minLiquidityUsd: 10,
-      minProfitUsd: 1,
       routes: {},
     },
     polling: {
@@ -954,5 +947,110 @@ describe("keeper lifecycle", () => {
       },
     })).rejects.toThrow("Alchemy-only pricing cannot price AJNA token");
     expect(mockDiscoverPools).not.toHaveBeenCalled();
+  });
+
+  it("wires per-chain funded overrides into createFundedStrategy", async () => {
+    // Seed the fixture with non-default per-chain values so a regression that
+    // reads the (now removed) top-level AppConfig.funded would pass undefined
+    // or the wrong number here.
+    const baseConfig = makeConfig();
+    baseConfig.chains[0].funded = {
+      targetExitPriceUsd: 0.42,
+      maxTakeAmount: 1234567890n,
+      autoApprove: true,
+    };
+    mockDiscoverPools.mockImplementation(async () => {
+      requestShutdown();
+      return [];
+    });
+
+    await startKeeper(baseConfig);
+
+    expect(mockCreateFundedStrategy).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({
+        targetExitPriceUsd: 0.42,
+        maxTakeAmount: 1234567890n,
+        autoApprove: true,
+      }),
+    );
+  });
+
+  it("wires per-chain flashArb overrides into createFlashArbStrategy", async () => {
+    const baseConfig = makeConfig();
+    baseConfig.chains[0].strategy = "flash-arb";
+    baseConfig.chains[0].flashArb = {
+      onChainSlippageFloorPercent: 0.25,
+      minLiquidityUsd: 777,
+      minProfitUsd: 55,
+    };
+    mockCreateFlashArbStrategy.mockReturnValue(mockFundedStrategy);
+    mockDiscoverPools.mockImplementation(async () => {
+      requestShutdown();
+      return [];
+    });
+
+    await startKeeper(baseConfig);
+
+    expect(mockCreateFlashArbStrategy).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({
+        onChainSlippageFloorPercent: 0.25,
+        minLiquidityUsd: 777,
+        minProfitUsd: 55,
+      }),
+    );
+  });
+
+  it("creates the correct strategy per chain in mixed mode", async () => {
+    // Marquee feature: funded on one chain, flash-arb on another, from one
+    // Node process. Use distinct ajnaTokens per chain so the assertion proves
+    // each factory received the MATCHING chain's config, not just that both
+    // factories fired once.
+    const baseConfig = makeConfig();
+    const baseChain = baseConfig.chains[0];
+    const baseAjna = "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const mainnetAjna = "0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+    baseChain.chainConfig = { ...baseChain.chainConfig, ajnaToken: baseAjna };
+    const mainnetChain = {
+      ...baseChain,
+      chainConfig: {
+        ...baseChain.chainConfig,
+        name: "mainnet" as const,
+        ajnaToken: mainnetAjna,
+      },
+      strategy: "flash-arb" as const,
+    };
+    baseConfig.chains = [baseChain, mainnetChain];
+    mockCreateFlashArbStrategy.mockReturnValue(mockFundedStrategy);
+    mockDiscoverPools.mockImplementation(async () => {
+      requestShutdown();
+      return [];
+    });
+
+    await startKeeper(baseConfig);
+
+    expect(mockCreateFundedStrategy).toHaveBeenCalledTimes(1);
+    expect(mockCreateFlashArbStrategy).toHaveBeenCalledTimes(1);
+    // Funded is called as createFundedStrategy(pub, wallet, ajnaToken, submitter, config)
+    // Flash-arb is called as createFlashArbStrategy(pub, wallet, submitter, { ajnaToken, ... })
+    expect(mockCreateFundedStrategy).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      baseAjna,
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(mockCreateFlashArbStrategy).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({ ajnaToken: mainnetAjna }),
+    );
   });
 });

@@ -1,6 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { loadConfig } from "../../src/config.js";
 import { BASE_CONFIG } from "../../src/chains/index.js";
+import { logger } from "../../src/utils/logger.js";
 import { createCipheriv, scryptSync } from "node:crypto";
 import { writeFileSync, mkdirSync, existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -118,7 +119,7 @@ describe("config", () => {
     expect(config.chains[0].chainConfig.name).toBe("base");
     expect(config.strategy).toBe("funded");
     expect(config.dryRun).toBe(true);
-    expect(config.funded.targetExitPriceUsd).toBe(0.1);
+    expect(config.chains[0].funded.targetExitPriceUsd).toBe(0.1);
     expect(config.pricing.provider).toBe("coingecko");
   });
 
@@ -704,10 +705,15 @@ describe("config", () => {
     const config = loadConfig(CONFIG_FILE);
     expect(config.strategy).toBe("flash-arb");
     expect(config.flashArb).toMatchObject({
+      executorAddress: "0x1234567890123456789012345678901234567890",
+    });
+    // Thresholds live on the per-chain ResolvedChainConfig, not the top-level
+    // AppConfig. The global values set here are the defaults the resolver
+    // merges onto each chain.
+    expect(config.chains[0].flashArb).toMatchObject({
       onChainSlippageFloorPercent: 0.5,
       minLiquidityUsd: 250,
       minProfitUsd: 5,
-      executorAddress: "0x1234567890123456789012345678901234567890",
     });
     expect(config.flashArb.routes.base).toEqual({
       quoterAddress: "0x1111111111111111111111111111111111111111",
@@ -734,6 +740,51 @@ describe("config", () => {
         ],
       },
     });
+  });
+
+  it("rejects a typo'd per-chain key (strict mode on chainConfigSchema)", () => {
+    // Without .strict() on chainConfigSchema, `stratgey` would silently drop
+    // and the per-chain strategy override would disappear — the operator
+    // would think they enabled flash-arb on mainnet but the top-level funded
+    // default would run instead.
+    writeConfig({
+      chains: {
+        mainnet: {
+          enabled: true,
+          rpcUrl: "https://mainnet-rpc.example.com",
+          stratgey: "flash-arb",
+        },
+      },
+      strategy: "funded",
+      funded: { targetExitPriceUsd: 0.1 },
+    });
+
+    expect(() => loadConfig(CONFIG_FILE)).toThrow(/stratgey/);
+  });
+
+  it("rejects a misspelled chain name (strict mode on chains object)", () => {
+    writeConfig({
+      chains: {
+        arbitram: { enabled: true, rpcUrl: "https://arb-rpc.example.com" },
+      },
+      strategy: "funded",
+      funded: { targetExitPriceUsd: 0.1 },
+    });
+
+    expect(() => loadConfig(CONFIG_FILE)).toThrow(/arbitram/);
+  });
+
+  it("rejects a typo'd top-level config key (strict mode on configFileSchema)", () => {
+    writeConfig({
+      chains: {
+        base: { enabled: true, rpcUrl: "https://base-rpc.example.com" },
+      },
+      strategy: "funded",
+      funded: { targetExitPriceUsd: 0.1 },
+      drrunn: false,
+    });
+
+    expect(() => loadConfig(CONFIG_FILE)).toThrow(/drrunn/);
   });
 
   it("rejects the legacy flashArb.maxSlippagePercent key so stale configs fail loudly", () => {
@@ -867,6 +918,168 @@ describe("config", () => {
     });
 
     expect(() => loadConfig(CONFIG_FILE)).toThrow(/maxSlippagePercent/);
+  });
+
+  it("rejects a typo'd key in the top-level funded block (strict mode)", () => {
+    writeConfig({
+      chains: {
+        base: { enabled: true, rpcUrl: "https://base-rpc.example.com" },
+      },
+      strategy: "funded",
+      // Typo: `tatgetExitPriceUsd` vs `targetExitPriceUsd`. Without strict mode
+      // this would silently fall back to the default and the operator's
+      // intended value would be ignored.
+      funded: { targetExitPriceUsd: 0.1, tatgetExitPriceUsd: 0.5 },
+    });
+
+    expect(() => loadConfig(CONFIG_FILE)).toThrow(/tatgetExitPriceUsd/);
+  });
+
+  it("rejects a maxTakeAmount that is not a positive integer string", () => {
+    for (const bad of ["0", "-1", "abc", "1.5", ""]) {
+      writeConfig({
+        chains: { base: { enabled: true, rpcUrl: "https://base-rpc.example.com" } },
+        strategy: "funded",
+        funded: { targetExitPriceUsd: 0.1, maxTakeAmount: bad },
+      });
+      expect(() => loadConfig(CONFIG_FILE), `maxTakeAmount=${JSON.stringify(bad)} should be rejected`).toThrow(/maxTakeAmount/);
+    }
+  });
+
+  it("merges per-chain funded overrides on top of the global funded block", () => {
+    writeConfig({
+      chains: {
+        base: {
+          enabled: true,
+          rpcUrl: "https://base-rpc.example.com",
+          strategy: "funded",
+          funded: { targetExitPriceUsd: 0.25, maxTakeAmount: "5000000000000000000" },
+        },
+        arbitrum: {
+          enabled: true,
+          rpcUrl: "https://arb-rpc.example.com",
+          strategy: "funded",
+        },
+      },
+      strategy: "funded",
+      funded: { targetExitPriceUsd: 0.1, maxTakeAmount: "1000000000000000000", autoApprove: true },
+    });
+
+    const config = loadConfig(CONFIG_FILE);
+    const base = config.chains.find((c) => c.chainConfig.name === "base")!;
+    const arb = config.chains.find((c) => c.chainConfig.name === "arbitrum")!;
+    expect(base.funded.targetExitPriceUsd).toBe(0.25);
+    expect(base.funded.maxTakeAmount).toBe(5_000_000_000_000_000_000n);
+    expect(base.funded.autoApprove).toBe(true);
+    expect(arb.funded.targetExitPriceUsd).toBe(0.1);
+    expect(arb.funded.maxTakeAmount).toBe(1_000_000_000_000_000_000n);
+  });
+
+  it("warns when a chain has flashArb overrides but resolves to funded", () => {
+    const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+    try {
+      writeConfig({
+        chains: {
+          base: {
+            enabled: true,
+            rpcUrl: "https://base-rpc.example.com",
+            strategy: "funded",
+            flashArb: { minProfitUsd: 5 },
+          },
+        },
+        strategy: "funded",
+        funded: { targetExitPriceUsd: 0.1 },
+      });
+      loadConfig(CONFIG_FILE);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringMatching(/chains\.base\.flashArb.*strategy is "funded"/),
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("warns when a chain has funded overrides but resolves to flash-arb", () => {
+    const MAINNET_USDC = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
+    const MAINNET_AJNA = "0x9a96ec9B57Fb64FbC60B423d1f4da7691Bd35079";
+    const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+    try {
+      writeConfig({
+        chains: {
+          mainnet: {
+            enabled: true,
+            rpcUrl: "https://mainnet-rpc.example.com",
+            strategy: "flash-arb",
+            funded: { targetExitPriceUsd: 0.5 },
+          },
+        },
+        strategy: "flash-arb",
+        funded: { targetExitPriceUsd: 0.1 },
+        flashArb: {
+          executorAddress: "0x1234567890123456789012345678901234567890",
+          routes: {
+            mainnet: {
+              quoterAddress: "0x1111111111111111111111111111111111111111",
+              flashLoanPools: { USDC: "0x2222222222222222222222222222222222222222" },
+              quoteToAjnaPaths: {
+                USDC: encodeUniswapV3Path(MAINNET_USDC, 500, MAINNET_AJNA),
+              },
+            },
+          },
+        },
+      });
+      loadConfig(CONFIG_FILE);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringMatching(/chains\.mainnet\.funded.*strategy is "flash-arb"/),
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("warns when flashArb.routes.<chain> is stale on a funded-resolved chain", () => {
+    const BASE_USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+    const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+    try {
+      writeConfig({
+        chains: {
+          base: {
+            enabled: true,
+            rpcUrl: "https://base-rpc.example.com",
+            strategy: "funded",
+          },
+        },
+        strategy: "funded",
+        funded: { targetExitPriceUsd: 0.1 },
+        flashArb: {
+          executorAddress: "0x1234567890123456789012345678901234567890",
+          routes: {
+            base: {
+              quoterAddress: "0x1111111111111111111111111111111111111111",
+              flashLoanPools: { USDC: "0x2222222222222222222222222222222222222222" },
+              quoteToAjnaPaths: {
+                USDC: encodeUniswapV3Path(BASE_USDC, 500, BASE_CONFIG.ajnaToken),
+              },
+            },
+          },
+        },
+      });
+      loadConfig(CONFIG_FILE);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringMatching(/flashArb\.routes\.base.*resolves to "funded"/),
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("does not require a flashArb route for a chain running the funded strategy", () => {
+    writeConfig({
+      chains: { base: { enabled: true, rpcUrl: "https://base-rpc.example.com", strategy: "funded" } },
+      strategy: "funded",
+      funded: { targetExitPriceUsd: 0.1 },
+    });
+    expect(() => loadConfig(CONFIG_FILE)).not.toThrow();
   });
 
   it("normalizes flash-arb route symbols to uppercase", () => {

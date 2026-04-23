@@ -826,9 +826,11 @@ export function createFlashArbStrategy(
         return null;
       }
 
-      // Mirrors the kick-path guard: without a valid AJNA oracle price, oracle-
-      // divergence computes to NaN (idealAmountOut = quoteAmount × priceUsd / 0 =
-      // Infinity) and corrupts candidate ranking. Skip the tick entirely.
+      // Mirrors the kick-path guard. Without a finite, positive AJNA oracle
+      // price, idealAmountOut collapses — to Infinity when price=0 (→ NaN
+      // divergence via Infinity-based arithmetic) or directly to NaN when
+      // price is NaN/±Infinity. Either case corrupts candidate ranking in
+      // isBetterCandidate. Skip the tick entirely.
       if (!Number.isFinite(ctx.prices.ajnaPriceUsd) || ctx.prices.ajnaPriceUsd <= 0) {
         return null;
       }
